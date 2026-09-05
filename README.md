@@ -111,12 +111,17 @@ si no, se conecta directamente. Se puede forzar con `?mode=direct` o
 ## Publicar la página
 
 El repositorio incluye el workflow `.github/workflows/pages.yml`, que pasa los
-tests y publica `public/` en GitHub Pages en cada empuje. El propio workflow
-activa Pages la primera vez (`enablement: true`), así que no hay que configurar
-nada; si tu cuenta u organización lo impide, se activa a mano en
-**Settings → Pages → Source: GitHub Actions**.
+tests y publica `public/` en GitHub Pages en cada empuje.
 
-La URL resultante es `https://<usuario>.github.io/Crypto-screener/`.
+Hay que autorizarlo **una sola vez**, porque crear el sitio de Pages necesita
+permisos de administrador que el token del workflow no tiene:
+
+1. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
+2. **Actions →** la última ejecución **→ Re-run failed jobs** (o empuja
+   cualquier cambio).
+
+A partir de ahí cada empuje republica la página. La URL es
+`https://<usuario>.github.io/Crypto-screener/`.
 
 ## Datos: solo Bybit, en vivo
 
