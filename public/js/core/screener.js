@@ -1,14 +1,18 @@
 // Orquestador: mantiene la lista de perpetuos, los tickers y el acumulador de
 // volume delta, y produce los snapshots que consume la interfaz.
+//
+// No depende de Node: corre igual en el servidor y dentro de un Web Worker del
+// navegador. Lo único específico de cada entorno es la persistencia, que se
+// inyecta (`persistence`) y puede no existir.
 
 import { VolumeStore } from './volume-store.js';
-import { loadSnapshot, saveSnapshot } from './snapshot.js';
 
 export class Screener {
-  constructor({ config, source, log = () => {} }) {
+  constructor({ config, source, log = () => {}, persistence = null }) {
     this.config = config;
     this.source = source;
     this.log = log;
+    this.persistence = persistence;
 
     this.store = new VolumeStore();
     /** @type {Map<string, object>} */
@@ -29,7 +33,7 @@ export class Screener {
   }
 
   async start() {
-    if (this.config.persist) await this.#restore();
+    if (this.persistence) await this.#restore();
 
     await this.#refreshTickers();
     await this.#refreshInstruments();
@@ -49,7 +53,7 @@ export class Screener {
     // Rotar los cubos aunque no llegue ningún trade: si no, un mercado parado
     // seguiría mostrando delta viejo.
     this.#every(1000, () => this.store.advance());
-    if (this.config.persist) {
+    if (this.persistence) {
       this.#every(this.config.snapshotIntervalMs, () => this.#persist());
     }
 
@@ -59,12 +63,19 @@ export class Screener {
     );
   }
 
+  /** Cambia en caliente cuántos pares se siguen (lo usa el modo directo). */
+  async setMaxSymbols(maxSymbols) {
+    if (this.config.maxSymbols === maxSymbols) return;
+    this.config.maxSymbols = maxSymbols;
+    await this.#refreshInstruments();
+  }
+
   async stop() {
     this.stopped = true;
     for (const timer of this.timers) clearInterval(timer);
     this.timers = [];
     for (const stream of this.streams.values()) stream.stop();
-    if (this.config.persist) await this.#persist();
+    if (this.persistence) await this.#persist();
   }
 
   /**
@@ -140,7 +151,10 @@ export class Screener {
       droppedTrades: this.store.droppedTrades,
       symbolsWithTrades: this.store.size,
       streams: [...this.streams.values()].map((s) => s.status()),
-      memoryMB: Math.round(process.memoryUsage().rss / 1e6),
+      memoryMB:
+        typeof process !== 'undefined' && process.memoryUsage
+          ? Math.round(process.memoryUsage().rss / 1e6)
+          : null,
     };
   }
 
@@ -214,7 +228,7 @@ export class Screener {
 
   async #restore() {
     try {
-      const restored = await loadSnapshot(this.config.snapshotFile);
+      const restored = await this.persistence.load();
       if (restored) {
         this.store = restored;
         const hours = ((Date.now() - restored.startedAt) / 3600_000).toFixed(1);
@@ -230,7 +244,7 @@ export class Screener {
     // ~17 MB cada pocos minutos.
     if (this.store.trades === this.persistedTrades) return;
     try {
-      const bytes = await saveSnapshot(this.store, this.config.snapshotFile);
+      const bytes = await this.persistence.save(this.store);
       this.persistedTrades = this.store.trades;
       this.log('debug', `snapshot guardado (${Math.round(bytes / 1024)} KB)`);
     } catch (err) {

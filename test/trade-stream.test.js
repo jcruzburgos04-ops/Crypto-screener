@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TradeStream } from '../server/trade-stream.js';
+import { TradeStream } from '../public/js/core/trade-stream.js';
 
 // WebSocket falso que imita el protocolo v5 de Bybit para poder probar
 // suscripciones, parseo de trades y reconexión sin tocar el exchange.

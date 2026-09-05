@@ -1,0 +1,53 @@
+# Publica la interfaz del screener en GitHub Pages.
+#
+# La página es estática: al no tener detrás el servidor Node, se conecta a la
+# API pública de Bybit desde el propio navegador (modo directo). Para activarlo
+# una sola vez: Settings -> Pages -> Source: GitHub Actions.
+
+name: Publicar en GitHub Pages
+
+on:
+  push:
+    branches:
+      - claude/bybit-crypto-screener-78bi9l
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Un despliegue a la vez; los empujes nuevos cancelan al anterior.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Ejecutar la suite
+        run: npm test
+
+  deploy:
+    name: Desplegar
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Subir la interfaz
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4

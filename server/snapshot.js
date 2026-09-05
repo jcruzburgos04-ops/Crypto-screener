@@ -13,7 +13,7 @@ import {
   FINE_BUCKET_MS,
   COARSE_BUCKET_MS,
   MAX_WINDOW_MS,
-} from './volume-store.js';
+} from '../public/js/core/volume-store.js';
 
 const MAGIC = 0x42594256; // "BYBV"
 const VERSION = 1;

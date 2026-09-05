@@ -7,6 +7,9 @@ ventanas: 1m, 5m, 10m, 15m, 30m, 1h, 4h y 24h.
 Tabla densa, ordenable por cualquier columna, con buscador, favoritos y filtros
 por volumen, dirección y tamaño del delta.
 
+**Abrir online:** <https://jcruzburgos04-ops.github.io/Crypto-screener/>
+*(hay que activar GitHub Pages una vez: ver [Publicar la página](#publicar-la-página).)*
+
 ```
 Par        Precio      24h %     Vol 24h    5m Vol Delta   10m Vol Delta ↓   1h Vol Delta
 ETH        $2,452.83   -2.83%    $16.8b     $1.2m          $3.1m             $2.05m
@@ -66,29 +69,63 @@ ventanas están completas desde el primer segundo tras un reinicio.
 
 ---
 
-## Arranque rápido
+## Dos formas de usarlo
 
-Requisitos: **Node 22.4 o superior** (por el `WebSocket` nativo). Nada más.
+La misma interfaz funciona de dos maneras y elige sola cuál le toca.
+
+### 1. Online, por enlace (modo directo)
+
+<https://jcruzburgos04-ops.github.io/Crypto-screener/>
+
+La página es estática: **los WebSockets a Bybit los abre tu propio navegador**,
+dentro de un Web Worker. No hay servidor intermedio, no hay nada que instalar y
+los datos son los mismos que vería el servidor.
+
+A cambio, **el historial vive mientras la pestaña siga abierta**: si la cierras,
+las ventanas empiezan de cero. Para dejarlo un rato en una pantalla o mirar el
+delta de 10m está perfecto; para ventanas de 4h o 24h conviene el modo servidor.
+
+Por defecto sigue los **200 pares con más volumen de 24 h** (ajustable en el
+selector «Pares»): seguir 600 desde un móvil es mucho pedir.
+
+### 2. En local, con historial persistente (modo servidor)
+
+Requisitos: **Node 22.4 o superior** (por el `WebSocket` nativo). Sin dependencias.
 
 ```bash
-git clone <este-repo>
+git clone https://github.com/jcruzburgos04-ops/Crypto-screener.git
 cd Crypto-screener
 npm start
 ```
 
-Abre <http://127.0.0.1:8787>.
+Abre <http://127.0.0.1:8787>. El servidor mantiene las conexiones, acumula el
+delta y guarda el historial en disco, así que **las ventanas de 4h y 24h se
+llenan aunque cierres el navegador** y sobreviven a un reinicio. Dejarlo
+encendido de fondo en un servidor o una Raspberry Pi es la forma normal de
+usarlo.
 
-Al arrancar descarga la lista de perpetuos, abre las conexiones WebSocket
-necesarias (unos 100 símbolos por conexión) y empieza a acumular.
+La página detecta el modo sola: si responde `/api/health` usa el servidor (SSE);
+si no, se conecta directamente. Se puede forzar con `?mode=direct` o
+`?mode=server`.
 
-Dejarlo encendido de fondo en un servidor o un Raspberry Pi es la forma normal
-de usarlo: cuanto más tiempo lleve corriendo, más ventanas completas.
+## Publicar la página
+
+El repositorio incluye el workflow `.github/workflows/pages.yml`, que pasa los
+tests y publica `public/` en GitHub Pages en cada empuje. Solo hay que
+autorizarlo una vez:
+
+**Settings → Pages → Source: GitHub Actions.**
+
+A partir de ahí, la URL es
+`https://<usuario>.github.io/Crypto-screener/`.
 
 ## Datos: solo Bybit, en vivo
 
 **La aplicación no tiene ningún modo de datos simulados.** La única fuente
 posible es la API pública v5 de Bybit; no hay generador de precios ni archivo de
-ejemplo que pueda acabar en pantalla por error.
+ejemplo que pueda acabar en pantalla por error. Da igual el modo: en el directo
+los trades los recibe tu navegador y en el de servidor los recibe el proceso
+local, pero el origen es el mismo canal de Bybit.
 
 | Dato | Origen | Se actualiza |
 | --- | --- | --- |
@@ -215,17 +252,27 @@ curl -s 'http://127.0.0.1:8787/api/snapshot?tfs=10m' \
 
 ## Arquitectura
 
+El motor es el mismo en los dos modos: corre en Node o dentro de un Web Worker
+sin cambiar una línea. Lo único propio de cada entorno es la persistencia (fs),
+que se inyecta.
+
 ```
+public/js/core/    Motor compartido (no depende de Node)
+  screener.js        Orquestador: instrumentos, tickers y snapshots
+  volume-store.js    Acumulador de delta en ring buffers de dos niveles
+  trade-stream.js    Pool de WebSockets a publicTrade.* con reconexión y ping
+  bybit-rest.js      Cliente REST v5 (instrumentos y tickers)
+  bybit-source.js    Une los dos anteriores
+public/js/
+  worker.js        Motor dentro del navegador (modo directo)
+  app.js           Interfaz: tabla virtualizada, filtros, orden
+  format.js        Formateo de cifras
+  timeframes.js    Catálogo de ventanas, compartido con el servidor
 server/
   index.js         HTTP + SSE + estáticos (node:http, sin framework)
-  screener.js      Orquestador: instrumentos, tickers y construcción de snapshots
-  volume-store.js  Acumulador de delta en ring buffers de dos niveles
-  snapshot.js      Persistencia binaria del historial
-  trade-stream.js  Pool de WebSockets a publicTrade.* con reconexión y ping
-  bybit-rest.js    Cliente REST v5 (instrumentos y tickers)
-  bybit-source.js  Fuente de datos (REST + WebSocket)
+  snapshot.js      Serialización binaria del historial
+  persistence.js   Adaptador de disco que se inyecta en el orquestador
   config.js        Configuración y logger
-public/            Interfaz (módulos ES nativos, sin build ni framework)
 ```
 
 **Ring buffers de dos niveles** en `volume-store.js`: cubos de 10 s para las
@@ -256,7 +303,11 @@ aviso de datos no vivos.
 - **El delta es de *taker*.** Mide agresión, no posicionamiento neto: por cada
   comprador agresivo hay un vendedor pasivo al otro lado.
 - **Las ventanas largas necesitan tiempo encendido.** Ver arriba; las celdas
-  atenuadas avisan de ello.
+  atenuadas avisan de ello. En modo directo el historial se pierde al cerrar la
+  pestaña; en modo servidor no.
+- **El modo directo depende de que Bybit permita CORS** en sus endpoints
+  públicos de mercado. Si tu red, una extensión o el propio exchange lo
+  bloquean, la página lo dice con un aviso y siempre queda el modo servidor.
 - **Precisión de la ventana**: resolución de 10 s hasta 1 h y de 1 min por
   encima. Una ventana de 10m cubre entre 10m00s y 10m10s de trades.
 - Solo usa endpoints **públicos**: no hace falta API key ni hay órdenes de por

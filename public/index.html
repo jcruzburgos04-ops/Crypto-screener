@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bybit Perp Screener</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/css/styles.css" />
+    <link rel="stylesheet" href="css/styles.css" />
   </head>
   <body>
     <header class="topbar">
@@ -53,6 +53,18 @@
         </select>
       </label>
 
+      <label class="field" id="max-symbols-field" hidden
+             title="Cuántos pares seguir, de mayor a menor volumen de 24 h">
+        Pares
+        <select id="max-symbols">
+          <option value="50">top 50</option>
+          <option value="100">top 100</option>
+          <option value="200">top 200</option>
+          <option value="400">top 400</option>
+          <option value="0">todos</option>
+        </select>
+      </label>
+
       <details class="menu" id="tf-menu">
         <summary>Timeframes</summary>
         <div class="menu-body" id="tf-options"></div>
@@ -89,6 +101,6 @@
       <span id="throughput"></span>
     </footer>
 
-    <script type="module" src="/js/app.js"></script>
+    <script type="module" src="js/app.js"></script>
   </body>
 </html>

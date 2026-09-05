@@ -7,7 +7,7 @@ import {
   COARSE_BUCKET_MS,
   COARSE_SPAN_MS,
   MAX_WINDOW_MS,
-} from '../server/volume-store.js';
+} from '../public/js/core/volume-store.js';
 
 const T0 = 1_800_000_000_000; // instante fijo, alineado a minuto
 

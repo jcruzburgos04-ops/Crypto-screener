@@ -59,9 +59,13 @@ const state = {
   quotesSeen: new Set(),
   prevPrice: new Map(),
   flash: new Map(),
+  maxSymbols: saved.maxSymbols ?? 200,
+
+  mode: 'server',
   snapshotAt: 0,
   receivedAt: 0,
   connected: false,
+  fatalError: '',
   columns: [],
   pool: [],
 };
@@ -89,6 +93,7 @@ function saveSettings() {
     minVol: state.minVol,
     minDelta: state.minDelta,
     deltaDir: state.deltaDir,
+    maxSymbols: state.maxSymbols,
   };
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(data));
@@ -485,7 +490,7 @@ function renderTimeframeMenu() {
         // Reflejar el mínimo permitido: siempre queda al menos un timeframe.
         input.checked = state.tfs.includes(tf.id);
         saveSettings();
-        connect();
+        feed?.setTimeframes();
       });
       label.append(input, document.createTextNode(` ${tf.label}`));
       return label;
@@ -552,7 +557,15 @@ function updateBanner() {
   let message = '';
   let level = 'error';
 
-  if (!state.connected) {
+  if (state.fatalError) {
+    message = `${state.fatalError} Comprueba que ninguna extensión, VPN o red corporativa esté bloqueando api.bybit.com.`;
+  } else if (state.receivedAt === 0) {
+    message =
+      state.mode === 'direct'
+        ? 'Conectando con Bybit y descargando la lista de perpetuos…'
+        : 'Esperando el primer snapshot del servidor…';
+    level = 'warn';
+  } else if (!state.connected) {
     message = 'Sin conexión con el servidor del screener. Reintentando…';
   } else if (ageMs > 10_000) {
     message = `Sin datos nuevos desde hace ${Math.round(ageMs / 1000)} s. Los valores de la tabla no son actuales.`;
@@ -709,61 +722,221 @@ function wireControls() {
   });
 }
 
-// ---------------------------------------------------------------- conexión
+/**
+ * En modo directo los WebSockets los abre el navegador, así que conviene poder
+ * limitar cuántos pares se siguen (en un móvil, seguir 600 es mucho pedir).
+ */
+function renderModeControls() {
+  const field = $('max-symbols-field');
+  const select = $('max-symbols');
+  if (state.mode !== 'direct') {
+    field.hidden = true;
+    return;
+  }
+  field.hidden = false;
+  select.value = String(state.maxSymbols);
+  select.addEventListener('change', () => {
+    state.maxSymbols = Number(select.value) || 0;
+    saveSettings();
+    feed?.setMaxSymbols(state.maxSymbols);
+  });
+}
 
-let source = null;
+// ---------------------------------------------------------------- conexión
+//
+// Dos modos, con la misma interfaz:
+//
+//   servidor : la página la sirve el screener local -> snapshots por SSE, con
+//              historial persistente de hasta 24 h aunque cierres el navegador.
+//   directo  : la página es estática (GitHub Pages) -> un Web Worker abre los
+//              WebSockets a Bybit desde tu propio navegador. El historial se
+//              acumula mientras la pestaña siga abierta.
+//
+// El modo se detecta solo: si responde /api/health hay servidor detrás.
+
+const params = new URLSearchParams(location.search);
+
+/** Solo se aceptan destinos cifrados; ws:// queda para pruebas en local. */
+function safeUrl(raw, fallback, { allowInsecureLocal = false } = {}) {
+  if (!raw) return fallback;
+  try {
+    const url = new URL(raw);
+    const secure = url.protocol === 'https:' || url.protocol === 'wss:';
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    const insecureOk = allowInsecureLocal && local && ['http:', 'ws:'].includes(url.protocol);
+    if (secure || insecureOk) return raw.replace(/\/$/, '');
+  } catch {
+    /* URL inválida: se ignora y se usa el valor por defecto */
+  }
+  return fallback;
+}
+
+const directConfig = {
+  restUrl: safeUrl(params.get('rest'), 'https://api.bybit.com', { allowInsecureLocal: true }),
+  wsUrl: safeUrl(params.get('ws'), 'wss://stream.bybit.com/v5/public', { allowInsecureLocal: true }),
+  categories: ['linear'],
+  quoteCoins: [],
+  maxSymbols: state.maxSymbols,
+  tickerIntervalMs: 3000,
+  instrumentsIntervalMs: 30 * 60_000,
+  symbolsPerConnection: 100,
+  topicsPerSubscribe: 10,
+  snapshotIntervalMs: 0,
+};
+
+let feed = null;
+let lastHealth = null;
+
+function handleSnapshot(snapshot) {
+  state.connected = true;
+  onSnapshot(snapshot);
+}
+
+function handleHealth(health) {
+  if (lastHealth && health.uptimeMs > lastHealth.uptimeMs) {
+    const seconds = Math.max(1, (health.uptimeMs - lastHealth.uptimeMs) / 1000);
+    const perSecond = Math.max(0, Math.round((health.trades - lastHealth.trades) / seconds));
+    dom.throughput.textContent = `${perSecond.toLocaleString('es-ES')} trades/s · ${health.instruments} perpetuos`;
+  }
+  lastHealth = health;
+
+  const conexiones = health.streams.reduce((total, s) => total + s.connections.length, 0);
+  const plural = conexiones === 1 ? 'conexión' : 'conexiones';
+  const origen = state.mode === 'direct' ? 'conexión directa desde tu navegador' : 'servidor local';
+  dom.subtitle.textContent = `Bybit v5 · ${origen} · ${health.instruments} perpetuos · ${conexiones} ${plural}`;
+}
+
+// --- modo servidor (SSE) ---
+
+function createServerFeed() {
+  let source = null;
+  const poll = async (previous = null) => {
+    if (state.mode !== 'server') return;
+    try {
+      const health = await (await fetch('/api/health')).json();
+      handleHealth(health);
+      setTimeout(() => poll(health), 5000);
+    } catch {
+      setTimeout(() => poll(previous), 5000);
+    }
+  };
+
+  return {
+    connect() {
+      source?.close();
+      source = new EventSource(`/api/stream?tfs=${encodeURIComponent(state.tfs.join(','))}`);
+      source.addEventListener('open', () => {
+        state.connected = true;
+        updateBanner();
+      });
+      source.addEventListener('message', (event) => {
+        try {
+          handleSnapshot(JSON.parse(event.data));
+        } catch (err) {
+          console.error('snapshot ilegible', err);
+        }
+      });
+      source.addEventListener('error', () => {
+        state.connected = false;
+        dom.statusDot.classList.remove('live');
+        dom.statusDot.classList.add('down');
+        dom.statusText.textContent = 'sin conexión con el servidor';
+        updateBanner();
+      });
+      poll();
+    },
+    setTimeframes() {
+      this.connect(); // el servidor calcula solo los timeframes pedidos
+    },
+    setMaxSymbols() {},
+  };
+}
+
+// --- modo directo (Web Worker) ---
+
+function createDirectFeed() {
+  const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+
+  worker.addEventListener('message', (event) => {
+    const message = event.data ?? {};
+    switch (message.type) {
+      case 'snapshot':
+        handleSnapshot(message.snapshot);
+        break;
+      case 'health':
+        handleHealth(message.health);
+        break;
+      case 'error':
+        state.connected = false;
+        state.fatalError = message.message;
+        updateBanner();
+        break;
+      case 'log':
+        if (message.kind === 'error' || message.kind === 'warn') console.warn(message.message);
+        break;
+      default:
+        break;
+    }
+  });
+
+  worker.addEventListener('error', (event) => {
+    state.fatalError = `El motor del navegador falló: ${event.message}`;
+    updateBanner();
+  });
+
+  return {
+    connect() {
+      state.connected = true; // el worker es local; la conexión real la reporta el snapshot
+      worker.postMessage({
+        type: 'start',
+        config: { ...directConfig, maxSymbols: state.maxSymbols },
+        tfs: state.tfs,
+        pushIntervalMs: 1500,
+      });
+    },
+    setTimeframes() {
+      worker.postMessage({ type: 'timeframes', tfs: state.tfs });
+    },
+    setMaxSymbols(value) {
+      worker.postMessage({ type: 'maxSymbols', value });
+    },
+  };
+}
+
+/** Hay servidor detrás si /api/health responde; si no, modo directo. */
+async function detectMode() {
+  const forced = params.get('mode');
+  if (forced === 'direct' || forced === 'server') return forced;
+  try {
+    const res = await fetch('api/health', { signal: AbortSignal.timeout(2500) });
+    if (res.ok) {
+      await res.json();
+      return 'server';
+    }
+  } catch {
+    /* página estática: sin servidor propio detrás */
+  }
+  return 'direct';
+}
 
 function connect() {
-  source?.close();
-  source = new EventSource(`/api/stream?tfs=${encodeURIComponent(state.tfs.join(','))}`);
-  source.addEventListener('open', () => {
-    state.connected = true;
-    updateBanner();
-  });
-  source.addEventListener('message', (event) => {
-    state.connected = true;
-    try {
-      onSnapshot(JSON.parse(event.data));
-    } catch (err) {
-      console.error('snapshot ilegible', err);
-    }
-  });
-  source.addEventListener('error', () => {
-    state.connected = false;
-    dom.statusDot.classList.remove('live');
-    dom.statusDot.classList.add('down');
-    dom.statusText.textContent = 'sin conexión con el servidor';
-    updateBanner();
-  });
+  feed?.connect();
 }
 
-async function pollHealth(previous = null) {
-  try {
-    const health = await (await fetch('/api/health')).json();
-    if (previous) {
-      const seconds = Math.max(1, (health.uptimeMs - previous.uptimeMs) / 1000);
-      const perSecond = Math.max(0, Math.round((health.trades - previous.trades) / seconds));
-      dom.throughput.textContent = `${perSecond.toLocaleString('es-ES')} trades/s · ${health.instruments} perpetuos`;
-    }
-    const conexiones = health.streams.reduce((total, s) => total + s.connections.length, 0);
-    const plural = conexiones === 1 ? 'conexión' : 'conexiones';
-    dom.subtitle.textContent = `Bybit v5 · ${health.instruments} perpetuos · ${conexiones} ${plural} WebSocket`;
-    setTimeout(() => pollHealth(health), 5000);
-  } catch {
-    setTimeout(() => pollHealth(previous), 5000);
-  }
-}
-
-function init() {
+async function init() {
   state.activeTfs = [...state.tfs];
   rebuildColumns();
   renderTimeframeMenu();
   updateFilterLabels();
   wireControls();
-  connect();
-  pollHealth();
   tickFreshness();
   setInterval(tickFreshness, 1000);
+
+  state.mode = await detectMode();
+  document.body.dataset.mode = state.mode;
+  feed = state.mode === 'server' ? createServerFeed() : createDirectFeed();
+  renderModeControls();
+  feed.connect();
 }
 
 init();

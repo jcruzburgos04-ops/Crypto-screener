@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { VolumeStore } from '../server/volume-store.js';
+import { VolumeStore } from '../public/js/core/volume-store.js';
 import { serialize, deserialize, saveSnapshot, loadSnapshot } from '../server/snapshot.js';
 
 const T0 = 1_800_000_000_000;

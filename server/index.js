@@ -6,8 +6,9 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { loadConfig, createLogger } from './config.js';
-import { Screener } from './screener.js';
-import { createBybitSource } from './bybit-source.js';
+import { createFilePersistence } from './persistence.js';
+import { Screener } from '../public/js/core/screener.js';
+import { createBybitSource } from '../public/js/core/bybit-source.js';
 import { parseTimeframes } from '../public/js/timeframes.js';
 
 const MIME = {
@@ -63,7 +64,8 @@ export async function main(env = process.env, { source: injectedSource, handleSi
   const log = createLogger(config.logLevel);
   const source = injectedSource ?? createBybitSource(config);
 
-  const screener = new Screener({ config, source, log });
+  const persistence = config.persist ? createFilePersistence(config) : null;
+  const screener = new Screener({ config, source, log, persistence });
   await screener.start();
 
   /** @type {Set<{res:import('node:http').ServerResponse, timeframes:Array, key:string}>} */
