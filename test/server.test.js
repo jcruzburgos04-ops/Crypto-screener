@@ -1,90 +1,113 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { main } from '../server/index.js';
+import { createFakeSource } from './helpers/fake-source.js';
 
-// Arranca el servidor real con el feed simulado y comprueba la API HTTP.
+// Arranca el servidor real (mismo main() que `npm start`) e inyecta una fuente
+// de test para controlar exactamente qué trades entran. La aplicación publicada
+// no tiene esta puerta: sin inyección, la única fuente posible es Bybit.
 
-let child;
+let app;
+let source;
 let baseUrl;
 
 before(async () => {
   const dir = await mkdtemp(join(tmpdir(), 'screener-http-'));
-  child = spawn(process.execPath, ['server/index.js'], {
-    env: {
-      ...process.env,
-      MOCK: '1',
+  source = createFakeSource();
+  app = await main(
+    {
+      HOST: '127.0.0.1',
       PORT: '0',
-      PUSH_INTERVAL_MS: '250',
-      SNAPSHOT_FILE: join(dir, 'vol.bin'),
+      PUSH_INTERVAL_MS: '150',
+      PERSIST: '0',
       LOG_LEVEL: 'error',
+      SNAPSHOT_FILE: join(dir, 'vol.bin'),
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+    { source },
+  );
+  baseUrl = app.url;
 
-  baseUrl = await new Promise((resolvePort, reject) => {
-    const timer = setTimeout(() => reject(new Error('el servidor no arrancó a tiempo')), 20_000);
-    let buffer = '';
-    const onData = (chunk) => {
-      buffer += chunk;
-      const match = buffer.match(/http:\/\/[\d.]+:(\d+)/);
-      if (match) {
-        clearTimeout(timer);
-        resolvePort(match[0]);
-      }
-    };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', onData);
-    child.on('exit', (code) => reject(new Error(`el servidor terminó con código ${code}`)));
-  });
-
-  // Deja correr el feed simulado para que haya trades acumulados.
-  await new Promise((r) => setTimeout(r, 1500));
+  const now = Date.now();
+  // BTC: 1.000.000 comprado y 400.000 vendido -> delta +600.000
+  source.emit({ symbol: 'BTCUSDT', ts: now, quoteVolume: 1_000_000, isBuy: true });
+  source.emit({ symbol: 'BTCUSDT', ts: now, quoteVolume: 400_000, isBuy: false });
+  // ETH: solo ventas -> delta negativo
+  source.emit({ symbol: 'ETHUSDT', ts: now, quoteVolume: 250_000, isBuy: false });
+  // SOL: un trade de hace 20 minutos, fuera de la ventana de 10m
+  source.emit({ symbol: 'SOLUSDC', ts: now - 20 * 60_000, quoteVolume: 900_000, isBuy: true });
 });
 
-after(() => {
-  child?.kill('SIGKILL');
+after(async () => {
+  await app?.close();
 });
 
-test('/api/health informa del estado del feed', async () => {
+const snapshot = async (tfs) => (await fetch(`${baseUrl}/api/snapshot?tfs=${tfs}`)).json();
+const rowOf = (snap, symbol) => snap.rows.find((r) => r.s === symbol);
+
+test('/api/health informa de la fuente y del estado del feed', async () => {
   const res = await fetch(`${baseUrl}/api/health`);
   assert.equal(res.status, 200);
   const health = await res.json();
-  assert.equal(health.source, 'mock');
-  assert.ok(health.instruments > 0);
-  assert.ok(health.trades > 0, 'deberían haber llegado trades');
+  assert.equal(health.source, 'test-fixture');
+  assert.equal(health.instruments, 3);
+  assert.equal(health.trades, 4);
 });
 
-test('/api/snapshot devuelve una fila por par con los timeframes pedidos', async () => {
-  const res = await fetch(`${baseUrl}/api/snapshot?tfs=10m,1h`);
-  const snap = await res.json();
+test('el delta es exactamente compras menos ventas', async () => {
+  const snap = await snapshot('10m,1h');
 
-  assert.deepEqual(snap.tfs, ['10m', '1h']);
-  assert.ok(snap.rows.length > 0);
+  const btc = rowOf(snap, 'BTCUSDT');
+  assert.deepEqual(btc.d['10m'], [600_000, 1_400_000]); // [delta, volumen total]
+  assert.equal(btc.p, '68123.5'); // precio tal cual lo publica el exchange
+  assert.equal(btc.c, -0.0283);
 
-  const row = snap.rows[0];
-  for (const key of ['s', 'b', 'q', 'p', 'c', 'v', 'd', 'cov']) {
-    assert.ok(key in row, `falta el campo ${key}`);
-  }
-  assert.equal(Object.keys(row.d).length, 2);
-  assert.ok(Array.isArray(row.d['10m']));
+  const eth = rowOf(snap, 'ETHUSDT');
+  assert.deepEqual(eth.d['10m'], [-250_000, 250_000]);
+});
 
-  const withVolume = snap.rows.filter((r) => r.d['10m'][1] > 0);
-  assert.ok(withVolume.length > 0, 'algún par debería tener volumen acumulado');
-  for (const r of withVolume) {
-    assert.ok(Math.abs(r.d['10m'][0]) <= r.d['10m'][1], '|delta| nunca supera el volumen total');
-  }
+test('cada ventana solo cuenta los trades que le corresponden', async () => {
+  const snap = await snapshot('10m,1h');
+  const sol = rowOf(snap, 'SOLUSDC');
+
+  assert.deepEqual(sol.d['10m'], [0, 0], 'un trade de hace 20 min no entra en 10m');
+  assert.deepEqual(sol.d['1h'], [900_000, 900_000], 'pero sí en 1h');
+});
+
+test('los pares sin trades aparecen con delta cero, no ausentes', async () => {
+  const snap = await snapshot('1m');
+  assert.equal(snap.rows.length, 3);
+  assert.deepEqual(rowOf(snap, 'SOLUSDC').d['1m'], [0, 0]);
 });
 
 test('los timeframes inválidos caen al valor por defecto', async () => {
-  const res = await fetch(`${baseUrl}/api/snapshot?tfs=7s,basura`);
-  const snap = await res.json();
+  const snap = await snapshot('7s,basura');
   assert.deepEqual(snap.tfs, ['5m', '10m', '1h']);
 });
 
-test('/api/stream emite snapshots por SSE', async () => {
+test('el snapshot declara si los datos están vivos', async () => {
+  const snap = await snapshot('10m');
+  assert.equal(snap.live, true);
+  assert.equal(snap.streamsUp, true);
+  assert.equal(snap.tickersFresh, true);
+  assert.ok(snap.trades > 0);
+  assert.ok(snap.tickerAgeMs < 15_000);
+});
+
+test('si el stream se cae, el snapshot deja de declararse en vivo', async () => {
+  source.connected = false;
+  try {
+    const snap = await snapshot('10m');
+    assert.equal(snap.streamsUp, false);
+    assert.equal(snap.live, false, 'el cliente debe poder avisar de que no es tiempo real');
+  } finally {
+    source.connected = true;
+  }
+});
+
+test('/api/stream empuja los trades nuevos sin recargar', async () => {
   const controller = new AbortController();
   const res = await fetch(`${baseUrl}/api/stream?tfs=1m`, { signal: controller.signal });
   assert.equal(res.headers.get('content-type'), 'text/event-stream; charset=utf-8');
@@ -92,21 +115,39 @@ test('/api/stream emite snapshots por SSE', async () => {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let events = 0;
-  const deadline = Date.now() + 5000;
-  while (events < 2 && Date.now() < deadline) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    events = (buffer.match(/^data: /gm) ?? []).length;
+
+  const nextSnapshot = async () => {
+    while (true) {
+      const marker = buffer.indexOf('\n\n');
+      if (marker !== -1) {
+        const chunk = buffer.slice(0, marker);
+        buffer = buffer.slice(marker + 2);
+        const line = chunk.split('\n').find((l) => l.startsWith('data: '));
+        if (line) return JSON.parse(line.slice(6));
+        continue;
+      }
+      const { value, done } = await reader.read();
+      if (done) throw new Error('el stream se cerró');
+      buffer += decoder.decode(value, { stream: true });
+    }
+  };
+
+  const first = await nextSnapshot();
+  assert.deepEqual(first.tfs, ['1m']);
+  const before = rowOf(first, 'ETHUSDT').d['1m'][0];
+
+  // Un trade nuevo debe reflejarse en el siguiente envío, sin pedir nada.
+  source.emit({ symbol: 'ETHUSDT', ts: Date.now(), quoteVolume: 750_000, isBuy: true });
+
+  let updated = null;
+  for (let i = 0; i < 12 && updated === null; i++) {
+    const snap = await nextSnapshot();
+    const value = rowOf(snap, 'ETHUSDT').d['1m'][0];
+    if (value !== before) updated = value;
   }
   controller.abort();
 
-  assert.ok(events >= 2, `se esperaban al menos 2 eventos, llegaron ${events}`);
-  const start = buffer.indexOf('data: ') + 6;
-  const first = JSON.parse(buffer.slice(start, buffer.indexOf('\n\n', start)));
-  assert.deepEqual(first.tfs, ['1m']);
-  assert.ok(first.rows.length > 0);
+  assert.equal(updated, before + 750_000, 'el delta debe subir con el trade emitido');
 });
 
 test('la interfaz se sirve como estática', async () => {
@@ -120,8 +161,7 @@ test('no se puede salir del directorio público', async () => {
   for (const path of ['/../server/config.js', '/%2e%2e/package.json', '/..%2fpackage.json']) {
     const res = await fetch(`${baseUrl}${path}`, { redirect: 'manual' });
     assert.ok(res.status === 403 || res.status === 404, `${path} devolvió ${res.status}`);
-    const body = await res.text();
-    assert.doesNotMatch(body, /BYBIT_REST|bybit-perp-screener/);
+    assert.doesNotMatch(await res.text(), /BYBIT_REST|bybit-perp-screener/);
   }
 });
 

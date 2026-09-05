@@ -35,6 +35,23 @@ El importe de cada trade se convierte a USD (`precio × cantidad` en contratos
 lineales; en inversos el tamaño ya viene en USD) y se acumula en cubos
 temporales. Las ventanas se leen sumando los cubos hacia atrás.
 
+### Relación con el CVD (cumulative volume delta)
+
+El CVD es la **suma acumulada** de ese delta a lo largo del tiempo: una curva que
+sube mientras manda la agresión compradora y baja cuando manda la vendedora. Lo
+que muestra cada columna de este screener es la **variación del CVD en esa
+ventana**:
+
+```
+delta 10m = CVD(ahora) − CVD(hace 10 min)
+```
+
+Es decir, la misma magnitud que la pendiente del CVD en los últimos 10 minutos,
+que es justo lo que sirve para escanear: ordenar por «10m Vol Delta» equivale a
+preguntar «¿en qué pares ha subido más el CVD en los últimos 10 minutos?».
+Un CVD absoluto acumulado desde el inicio de sesión no serviría para comparar
+pares entre sí, porque depende de cuándo empezó a contarse.
+
 ### Consecuencia importante: el historial se acumula, no se descarga
 
 Al arrancar por primera vez **no hay datos de delta**: se van llenando a medida
@@ -62,15 +79,45 @@ npm start
 Abre <http://127.0.0.1:8787>.
 
 Al arrancar descarga la lista de perpetuos, abre las conexiones WebSocket
-necesarias (unos 100 símbolos por conexión) y empieza a acumular. Para ver la
-interfaz funcionando sin esperar (y sin tocar Bybit) hay un mercado simulado:
-
-```bash
-npm run mock       # datos inventados, útil para probar la interfaz
-```
+necesarias (unos 100 símbolos por conexión) y empieza a acumular.
 
 Dejarlo encendido de fondo en un servidor o un Raspberry Pi es la forma normal
 de usarlo: cuanto más tiempo lleve corriendo, más ventanas completas.
+
+## Datos: solo Bybit, en vivo
+
+**La aplicación no tiene ningún modo de datos simulados.** La única fuente
+posible es la API pública v5 de Bybit; no hay generador de precios ni archivo de
+ejemplo que pueda acabar en pantalla por error.
+
+| Dato | Origen | Se actualiza |
+| --- | --- | --- |
+| Volume delta y volumen por ventana | WebSocket `publicTrade.*` | En cuanto llega cada operación |
+| Precio, 24h %, volumen 24h, OI, funding | REST `/v5/market/tickers` | Cada 3 s |
+| Lista de pares (listados nuevos) | REST `/v5/market/instruments-info` | Cada 30 min |
+| Tabla del navegador | SSE desde el servidor | Cada 1,5 s, sin recargar |
+
+La actualización es automática de principio a fin: el navegador no consulta
+nada, recibe los snapshots por *Server-Sent Events* y se reconecta solo si se
+corta.
+
+### Nunca se enseñan cifras viejas como si fueran de ahora
+
+Si el flujo se interrumpe, la interfaz lo dice en un aviso sobre la tabla en vez
+de dejar los números anteriores en pantalla:
+
+- **Sin conexión con el servidor** — el navegador perdió el SSE.
+- **Stream de trades caído** — el WebSocket de Bybit está reconectando; el delta
+  no avanza.
+- **Precios sin actualizar desde hace N s** — el REST de tickers no responde.
+- **Esperando los primeros trades** — recién arrancado, aún no hay delta.
+
+Además el pie indica en todo momento «actualizado hace N s», en rojo si pasa de
+10 segundos.
+
+*(El único doble de datos del repositorio vive en `test/helpers/fake-source.js`,
+lo usan los tests inyectándolo en `main()` y no se puede activar por
+configuración.)*
 
 ---
 
@@ -123,7 +170,6 @@ Todo por variables de entorno; los valores por defecto funcionan sin tocar nada.
 | `PERSIST` | `1` | Guardar el historial en disco |
 | `SNAPSHOT_FILE` | `data/volume-snapshot.bin` | Dónde guardarlo |
 | `SNAPSHOT_INTERVAL_MS` | `300000` | Cada cuánto guardarlo |
-| `MOCK` | `0` | Feed simulado, sin conexión a Bybit |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 Ejemplo — solo los 200 pares USDT más líquidos, accesible desde la red local:
@@ -177,8 +223,7 @@ server/
   snapshot.js      Persistencia binaria del historial
   trade-stream.js  Pool de WebSockets a publicTrade.* con reconexión y ping
   bybit-rest.js    Cliente REST v5 (instrumentos y tickers)
-  bybit-source.js  Fuente real
-  mock-feed.js     Mercado simulado con la misma interfaz
+  bybit-source.js  Fuente de datos (REST + WebSocket)
   config.js        Configuración y logger
 public/            Interfaz (módulos ES nativos, sin build ni framework)
 ```
@@ -199,10 +244,12 @@ pares actualizándose cada segundo no ralentizan el navegador.
 npm test
 ```
 
-40 tests: matemática de las ventanas y rotación de cubos, ida y vuelta de la
+44 tests: matemática de las ventanas y rotación de cubos, ida y vuelta de la
 persistencia, formateo de cifras, protocolo WebSocket contra un socket falso con
-mensajes reales de Bybit (suscripción por tandas, ping, reconexión,
-contratos inversos) y la API HTTP completa arrancando el servidor de verdad.
+mensajes reales de Bybit (suscripción por tandas, ping, reconexión, contratos
+inversos) y la API HTTP completa levantando el servidor real, con trades
+controlados para comprobar cifras exactas de delta, el reparto por ventanas y el
+aviso de datos no vivos.
 
 ## Notas y limitaciones
 
@@ -214,5 +261,4 @@ contratos inversos) y la API HTTP completa arrancando el servidor de verdad.
   encima. Una ventana de 10m cubre entre 10m00s y 10m10s de trades.
 - Solo usa endpoints **públicos**: no hace falta API key ni hay órdenes de por
   medio.
-- Los datos del feed simulado (`MOCK=1`) son inventados; la interfaz lo avisa
-  bajo el título.
+- El screener es de solo lectura: no envía órdenes ni necesita API key.

@@ -25,6 +25,8 @@ const dom = {
   empty: $('empty'),
   statusDot: $('status-dot'),
   statusText: $('status-text'),
+  banner: $('banner'),
+  updated: $('updated'),
   subtitle: $('subtitle'),
   count: $('count'),
   coverage: $('coverage'),
@@ -58,6 +60,8 @@ const state = {
   prevPrice: new Map(),
   flash: new Map(),
   snapshotAt: 0,
+  receivedAt: 0,
+  connected: false,
   columns: [],
   pool: [],
 };
@@ -159,6 +163,7 @@ function onSnapshot(snap) {
   const tfsChanged = snap.tfs.join(',') !== state.activeTfs.join(',');
   state.activeTfs = snap.tfs;
   state.snapshotAt = snap.t;
+  state.receivedAt = Date.now();
   state.snapshot = snap;
 
   for (const row of snap.rows) {
@@ -531,8 +536,52 @@ function updateStatusBar(snap) {
   const live = snap.live !== false;
   dom.statusDot.classList.toggle('live', live);
   dom.statusDot.classList.toggle('down', !live);
-  dom.statusText.textContent = live ? 'en vivo' : 'stream caído, reconectando…';
+  dom.statusText.textContent = live ? 'en vivo' : 'datos no actualizados';
   dom.coverage.textContent = `historial acumulado: ${fmtDuration(snap.cov)}`;
+  updateBanner();
+}
+
+/**
+ * Aviso explícito cuando lo que se ve en pantalla ya no viene de Bybit ahora
+ * mismo: sin conexión al servidor, stream caído, precios estancados o todavía
+ * sin trades. Nunca se muestran cifras antiguas como si fueran actuales.
+ */
+function updateBanner() {
+  const snap = state.snapshot;
+  const ageMs = state.receivedAt ? Date.now() - state.receivedAt : Infinity;
+  let message = '';
+  let level = 'error';
+
+  if (!state.connected) {
+    message = 'Sin conexión con el servidor del screener. Reintentando…';
+  } else if (ageMs > 10_000) {
+    message = `Sin datos nuevos desde hace ${Math.round(ageMs / 1000)} s. Los valores de la tabla no son actuales.`;
+  } else if (snap && snap.streamsUp === false) {
+    message = 'El stream de trades de Bybit está caído: el volume delta no se está actualizando. Reconectando…';
+  } else if (snap && snap.tickersFresh === false) {
+    const age = snap.tickerAgeMs ? `${Math.round(snap.tickerAgeMs / 1000)} s` : 'demasiado tiempo';
+    message = `Los precios y el volumen de 24 h llevan ${age} sin actualizarse (REST de Bybit).`;
+  } else if (snap && snap.trades === 0) {
+    message = 'Conectado a Bybit, esperando los primeros trades para calcular el delta…';
+    level = 'warn';
+  }
+
+  dom.banner.hidden = message === '';
+  dom.banner.textContent = message;
+  dom.banner.classList.toggle('warn', level === 'warn');
+}
+
+/** Reloj local: deja claro en todo momento cuándo llegó el último dato. */
+function tickFreshness() {
+  if (state.receivedAt === 0) {
+    dom.updated.textContent = 'esperando datos…';
+    dom.updated.classList.add('stale');
+  } else {
+    const seconds = Math.round((Date.now() - state.receivedAt) / 1000);
+    dom.updated.textContent = seconds <= 1 ? 'actualizado ahora mismo' : `actualizado hace ${seconds} s`;
+    dom.updated.classList.toggle('stale', seconds > 10);
+  }
+  updateBanner();
 }
 
 function bindNumberInput(input, key) {
@@ -667,7 +716,12 @@ let source = null;
 function connect() {
   source?.close();
   source = new EventSource(`/api/stream?tfs=${encodeURIComponent(state.tfs.join(','))}`);
+  source.addEventListener('open', () => {
+    state.connected = true;
+    updateBanner();
+  });
   source.addEventListener('message', (event) => {
+    state.connected = true;
     try {
       onSnapshot(JSON.parse(event.data));
     } catch (err) {
@@ -675,9 +729,11 @@ function connect() {
     }
   });
   source.addEventListener('error', () => {
+    state.connected = false;
     dom.statusDot.classList.remove('live');
     dom.statusDot.classList.add('down');
-    dom.statusText.textContent = 'sin conexión con el servidor…';
+    dom.statusText.textContent = 'sin conexión con el servidor';
+    updateBanner();
   });
 }
 
@@ -689,10 +745,9 @@ async function pollHealth(previous = null) {
       const perSecond = Math.max(0, Math.round((health.trades - previous.trades) / seconds));
       dom.throughput.textContent = `${perSecond.toLocaleString('es-ES')} trades/s · ${health.instruments} perpetuos`;
     }
-    dom.subtitle.textContent =
-      health.source === 'mock'
-        ? 'FEED SIMULADO (MOCK=1) — datos inventados'
-        : 'volume delta en tiempo real · Bybit perpetuos';
+    const conexiones = health.streams.reduce((total, s) => total + s.connections.length, 0);
+    const plural = conexiones === 1 ? 'conexión' : 'conexiones';
+    dom.subtitle.textContent = `Bybit v5 · ${health.instruments} perpetuos · ${conexiones} ${plural} WebSocket`;
     setTimeout(() => pollHealth(health), 5000);
   } catch {
     setTimeout(() => pollHealth(previous), 5000);
@@ -707,6 +762,8 @@ function init() {
   wireControls();
   connect();
   pollHealth();
+  tickFreshness();
+  setInterval(tickFreshness, 1000);
 }
 
 init();

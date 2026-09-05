@@ -8,7 +8,6 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { loadConfig, createLogger } from './config.js';
 import { Screener } from './screener.js';
 import { createBybitSource } from './bybit-source.js';
-import { createMockSource } from './mock-feed.js';
 import { parseTimeframes } from '../public/js/timeframes.js';
 
 const MIME = {
@@ -52,10 +51,17 @@ async function serveStatic(res, publicDir, pathname) {
   }
 }
 
-export async function main(env = process.env) {
+/**
+ * @param {NodeJS.ProcessEnv} env
+ * @param {object} options
+ * @param {object} [options.source] fuente de datos alternativa; SOLO la usan los
+ *   tests para inyectar un doble. En ejecución normal siempre es Bybit en vivo.
+ * @param {boolean} [options.handleSignals] instalar manejadores de SIGINT/SIGTERM
+ */
+export async function main(env = process.env, { source: injectedSource, handleSignals = false } = {}) {
   const config = loadConfig(env);
   const log = createLogger(config.logLevel);
-  const source = config.mock ? createMockSource(config) : createBybitSource(config);
+  const source = injectedSource ?? createBybitSource(config);
 
   const screener = new Screener({ config, source, log });
   await screener.start();
@@ -125,31 +131,37 @@ export async function main(env = process.env) {
 
   await new Promise((resolveListen) => server.listen(config.port, config.host, resolveListen));
   const { port } = server.address();
+  const url = `http://${config.host}:${port}`;
   // Siempre visible, sea cual sea LOG_LEVEL: es la información que hace falta
   // para abrir la interfaz.
-  console.log(`Bybit Perp Screener en http://${config.host}:${port}`);
-  if (config.mock) console.log('MODO SIMULADO: los datos son inventados, no vienen de Bybit');
+  console.log(`Bybit Perp Screener en ${url}`);
 
-  let closing = false;
-  const shutdown = async (signal) => {
-    if (closing) return;
-    closing = true;
-    log('info', `${signal}: cerrando`);
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
     clearInterval(pushTimer);
     for (const client of clients) client.res.end();
     clients.clear();
-    server.close();
+    await new Promise((done) => server.close(done));
     await screener.stop();
-    process.exit(0);
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  return { server, screener, config, close: () => shutdown('close') };
+  if (handleSignals) {
+    const shutdown = async (signal) => {
+      log('info', `${signal}: cerrando`);
+      await close();
+      process.exit(0);
+    };
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+  }
+
+  return { server, screener, config, url, close };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((err) => {
+  main(process.env, { handleSignals: true }).catch((err) => {
     console.error('fallo al arrancar:', err);
     process.exit(1);
   });

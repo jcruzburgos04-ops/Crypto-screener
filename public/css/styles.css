@@ -259,6 +259,26 @@ body {
   background: rgb(255 255 255 / 5%);
 }
 
+/* Aviso de datos no vivos: nunca se enseñan cifras viejas en silencio. */
+.banner {
+  margin: 0;
+  padding: 7px 16px;
+  background: rgb(246 70 93 / 14%);
+  border-bottom: 1px solid rgb(246 70 93 / 35%);
+  color: #ffc2cb;
+  font-size: 12px;
+}
+
+.banner.warn {
+  background: rgb(240 185 11 / 12%);
+  border-bottom-color: rgb(240 185 11 / 35%);
+  color: #ffe08a;
+}
+
+.statusbar .stale {
+  color: var(--red);
+}
+
 /* ---------- tabla ---------- */
 
 .table {

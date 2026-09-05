@@ -101,13 +101,25 @@ export class Screener {
       });
     }
 
+    // El cliente necesita poder distinguir "delta 0 porque no hubo trades" de
+    // "delta 0 porque el feed está caído": nunca se muestran cifras viejas como
+    // si fueran de ahora mismo.
+    const streamsUp = this.streams.size > 0 && [...this.streams.values()].every((s) => s.connected);
+    const tickerAgeMs = this.lastTickerAt ? now - this.lastTickerAt : null;
+    const tickersFresh =
+      tickerAgeMs !== null && tickerAgeMs < Math.max(15_000, this.config.tickerIntervalMs * 4);
+
     return {
       t: now,
       tfs: timeframes.map((tf) => tf.id),
       up: now - this.startedAt,
       cov: Math.max(0, now - this.store.startedAt),
-      live: [...this.streams.values()].every((s) => s.connected),
-      tickerAgeMs: this.lastTickerAt ? now - this.lastTickerAt : null,
+      live: streamsUp && tickersFresh,
+      streamsUp,
+      tickersFresh,
+      tickerAgeMs,
+      trades: this.store.trades,
+      lastError: this.lastError,
       rows,
     };
   }

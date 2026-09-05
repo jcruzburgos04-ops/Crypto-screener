@@ -37,10 +37,6 @@ export function loadConfig(env = process.env) {
     host: env.HOST || '127.0.0.1',
     port: num(env.PORT, 8787),
 
-    // `MOCK=1` levanta un mercado simulado: sirve para desarrollar la interfaz
-    // sin salida a internet o donde api.bybit.com esté bloqueado.
-    mock: bool(env.MOCK, false),
-
     restUrl: env.BYBIT_REST || 'https://api.bybit.com',
     wsUrl: env.BYBIT_WS || 'wss://stream.bybit.com/v5/public',
     categories: categories.length > 0 ? categories : ['linear'],
