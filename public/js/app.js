@@ -569,6 +569,13 @@ function updateBanner() {
     message = 'Sin conexión con el servidor del screener. Reintentando…';
   } else if (ageMs > 10_000) {
     message = `Sin datos nuevos desde hace ${Math.round(ageMs / 1000)} s. Los valores de la tabla no son actuales.`;
+  } else if (snap && snap.instruments === 0) {
+    // Sin lista de pares no hay nada que seguir: la causa raíz es el REST, no el stream.
+    const detalle = snap.lastError ? ` (${snap.lastError})` : '';
+    message =
+      state.mode === 'direct'
+        ? `No se pudo descargar la lista de perpetuos de Bybit${detalle}. Puede que tu red, una extensión del navegador o el propio exchange estén bloqueando api.bybit.com.`
+        : `El servidor no pudo descargar la lista de perpetuos de Bybit${detalle}.`;
   } else if (snap && snap.streamsUp === false) {
     message = 'El stream de trades de Bybit está caído: el volume delta no se está actualizando. Reconectando…';
   } else if (snap && snap.tickersFresh === false) {

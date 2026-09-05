@@ -129,6 +129,7 @@ export class Screener {
       streamsUp,
       tickersFresh,
       tickerAgeMs,
+      instruments: this.instruments.size,
       trades: this.store.trades,
       lastError: this.lastError,
       rows,

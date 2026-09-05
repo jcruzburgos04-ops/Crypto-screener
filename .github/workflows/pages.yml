@@ -1,8 +1,11 @@
 # Publica la interfaz del screener en GitHub Pages.
 #
 # La página es estática: al no tener detrás el servidor Node, se conecta a la
-# API pública de Bybit desde el propio navegador (modo directo). Para activarlo
-# una sola vez: Settings -> Pages -> Source: GitHub Actions.
+# API pública de Bybit desde el propio navegador (modo directo).
+#
+# El propio workflow activa Pages la primera vez (enablement: true). Si la
+# organización lo impide, se activa a mano en Settings -> Pages -> Source:
+# GitHub Actions.
 
 name: Publicar en GitHub Pages
 
@@ -44,7 +47,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # enablement activa Pages por API en el primer despliegue: no hace falta
+      # tocar nada en Settings.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Subir la interfaz
         uses: actions/upload-pages-artifact@v3
         with:
