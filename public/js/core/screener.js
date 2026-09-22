@@ -7,9 +7,10 @@
 
 import { VolumeStore } from './volume-store.js';
 import { pineEmaLive, pineEmaState } from './ema.js';
-import { DAY_MS, EMA_LENGTHS, evaluateCombos } from './combos.js';
+import { COMBOS, DAY_MS, EMA_LENGTHS, comboStatus } from './combos.js';
 
 const EMPTY_EMAS = EMA_LENGTHS.map(() => null);
+const EMPTY_COMBOS = COMBOS.map(() => null);
 const round = (x) => (x === null ? null : Number(x.toPrecision(10)));
 
 export class Screener {
@@ -198,12 +199,16 @@ export class Screener {
     const data = this.klines.get(symbol);
     const today = Math.floor(now / DAY_MS) * DAY_MS;
     // Sin velas, o con velas de un día que ya cerró y aún no se recargó.
-    if (!data || data.day !== today) return { ema: EMPTY_EMAS, rg: null, fd: null, kn: null };
+    if (!data || data.day !== today) return { ema: EMPTY_EMAS, cb: EMPTY_COMBOS, kn: null };
 
     const tickerPrice = Number(ticker?.price);
     const live = Number.isFinite(tickerPrice) && tickerPrice > 0 ? tickerPrice : data.todayClose;
-    const emas = data.states.map((state) => round(pineEmaLive(state, live)));
-    return { ...evaluateCombos(emas), kn: data.count + (Number.isFinite(live) ? 1 : 0) };
+    const raw = data.states.map((state) => pineEmaLive(state, live));
+    // cb[i] = [estado, % que le falta al precio para cruzar hoy] o null si no imprime.
+    const cb = COMBOS.map((_, i) =>
+      comboStatus(data.states[2 * i], data.states[2 * i + 1], raw[2 * i], raw[2 * i + 1], live),
+    );
+    return { ema: raw.map(round), cb, kn: data.count + (Number.isFinite(live) ? 1 : 0) };
   }
 
   #klinesLoaded(now) {

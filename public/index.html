@@ -53,27 +53,7 @@
         </select>
       </label>
 
-      <label class="field" title="Combo 1 (21/34, rápido) contra combo 2 (55/115, medio), en velas diarias">
-        Régimen
-        <select id="regime-filter">
-          <option value="all">todos</option>
-          <option value="3">R+ M+</option>
-          <option value="2">R− M+</option>
-          <option value="1">R+ M−</option>
-          <option value="0">R− M−</option>
-          <option value="midUp">medio alcista</option>
-          <option value="midDown">medio bajista</option>
-        </select>
-      </label>
-
-      <label class="field" title="EMA 300 contra EMA 600 diarias. Los pares sin EMA 600 no pasan por ninguno de los dos lados.">
-        300/600
-        <select id="trend-filter">
-          <option value="all">todos</option>
-          <option value="up">alcista ↑</option>
-          <option value="down">bajista ↓</option>
-        </select>
-      </label>
+      <span class="combo-filters" id="combo-filters"></span>
 
       <label class="field" id="max-symbols-field" hidden
              title="Cuántos pares seguir, de mayor a menor volumen de 24 h">

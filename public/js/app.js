@@ -6,7 +6,7 @@ import { TIMEFRAMES, TIMEFRAME_BY_ID, DEFAULT_TIMEFRAMES, parseTimeframes } from
 import { fmtUsd, fmtPrice, fmtPct, fmtFunding, fmtDuration, parseAmount, coinColor } from './format.js';
 import { compareSortValues } from './sorting.js';
 import {
-  COMBOS, REGIME_LABELS, passesRegimeFilter, passesTrendFilter,
+  COMBOS, COMBO_FILTERS, NEAR_CROSS_PCT, STATE, passesComboFilter,
 } from './core/combos.js';
 
 const ROW_H = 36;
@@ -22,8 +22,7 @@ const dom = {
   minVol: $('min-vol'),
   minDelta: $('min-delta'),
   deltaDir: $('delta-dir'),
-  regimeFilter: $('regime-filter'),
-  trendFilter: $('trend-filter'),
+  comboFilters: $('combo-filters'),
   klines: $('klines'),
   tfOptions: $('tf-options'),
   thead: $('thead'),
@@ -60,8 +59,8 @@ const state = {
   minVol: saved.minVol ?? 0,
   minDelta: saved.minDelta ?? 0,
   deltaDir: saved.deltaDir ?? 'all',
-  regimeFilter: saved.regimeFilter ?? 'all',
-  trendFilter: saved.trendFilter ?? 'all',
+  // Filtro por combo diario: { c1: 'all' | 'bull' | 'crossUp' | … }
+  comboFilters: { ...Object.fromEntries(COMBOS.map((c) => [c.id, 'all'])), ...(saved.comboFilters ?? {}) },
 
   rows: [],
   visible: [],
@@ -102,8 +101,7 @@ function saveSettings() {
     minVol: state.minVol,
     minDelta: state.minDelta,
     deltaDir: state.deltaDir,
-    regimeFilter: state.regimeFilter,
-    trendFilter: state.trendFilter,
+    comboFilters: state.comboFilters,
     maxSymbols: state.maxSymbols,
   };
   try {
@@ -122,9 +120,15 @@ function buildColumns() {
     { id: 'price', label: 'Precio', kind: 'price', width: '112px', num: true, sortValue: (r) => Number(r.p) || 0 },
     { id: 'chg', label: '24h %', kind: 'chg', width: '86px', num: true, sortValue: (r) => r.c },
     { id: 'vol24', label: 'Vol 24h', kind: 'usd', width: '108px', num: true, sortValue: (r) => r.v },
-    // Régimen 21/34 contra 55/115: se ordena por el número (3 → 0), no por el texto.
-    { id: 'regime', label: 'Régimen', kind: 'regime', width: '82px', sortValue: (r) => r.rg ?? null },
-    { id: 'trend', label: '300/600', kind: 'trend', width: '66px', sortValue: (r) => r.fd ?? null },
+    // Un combo diario por columna, ordenado por estado (5 alcista → 0 bajista).
+    ...COMBOS.map((combo, i) => ({
+      id: `combo:${combo.id}`,
+      label: `${combo.fast}/${combo.slow}`,
+      kind: 'combo',
+      index: i,
+      width: '138px',
+      sortValue: (r) => r.cb?.[i]?.[0] ?? null,
+    })),
   ];
 
   for (const id of state.activeTfs) {
@@ -254,8 +258,7 @@ function refresh() {
     if (state.deltaDir === 'buy' && delta <= 0) continue;
     if (state.deltaDir === 'sell' && delta >= 0) continue;
     if (minDelta > 0 && Math.abs(delta) < minDelta) continue;
-    if (!passesRegimeFilter(row.rg ?? null, state.regimeFilter)) continue;
-    if (!passesTrendFilter(row.fd ?? null, state.trendFilter)) continue;
+    if (!COMBOS.every((c, i) => passesComboFilter(row.cb?.[i]?.[0] ?? null, state.comboFilters[c.id]))) continue;
     visible.push(row);
   }
 
@@ -384,7 +387,7 @@ function setCell(cell, text, cls = '') {
   const names = cls.split(/\s+/).filter(Boolean);
   const normalized = names.join(' ');
   if (cell.dataset.cls === normalized) return;
-  cell.classList.remove('up', 'down', 'muted', 'partial');
+  cell.classList.remove('up', 'down', 'muted', 'partial', 'near', 'cross');
   for (const name of names) cell.classList.add(name);
   cell.dataset.cls = normalized;
 }
@@ -449,17 +452,11 @@ function paintCell(cell, col, row, isFav) {
       setCell(cell, fmtFunding(row.f), row.f > 0 ? 'up' : row.f < 0 ? 'down' : 'muted');
       break;
     }
-    case 'regime': {
-      const rg = row.rg ?? null;
-      const cls = rg === 3 ? 'up' : rg === 0 ? 'down' : rg === null ? 'muted' : '';
-      setCell(cell, rg === null ? '' : REGIME_LABELS[rg], cls);
-      cell.title = emaTooltip(row);
-      break;
-    }
-    case 'trend': {
-      const fd = row.fd ?? null;
-      setCell(cell, fd === null ? '' : fd === 1 ? '↑' : '↓', fd === 1 ? 'up' : fd === 0 ? 'down' : 'muted');
-      cell.title = fd === null ? `Sin EMA 600: ${row.kn ?? 0} velas diarias` : emaTooltip(row);
+    case 'combo': {
+      const status = row.cb?.[col.index] ?? null;
+      const [text, cls] = comboCell(status);
+      setCell(cell, text, cls);
+      cell.title = comboTooltip(row, col.index, status);
       break;
     }
     default:
@@ -467,12 +464,41 @@ function paintCell(cell, col, row, isFav) {
   }
 }
 
-/** Valores de las EMAs diarias; las que no imprimieron se muestran como tales. */
-function emaTooltip(row) {
-  if (!row.ema) return '';
-  const fmt = (v) => (v === null ? 'no imprime' : fmtPrice(String(v)));
-  const lines = COMBOS.map((c, i) => `${c.fast}/${c.slow}: ${fmt(row.ema[2 * i])} / ${fmt(row.ema[2 * i + 1])}`);
-  return [`${row.kn ?? 0} velas diarias (con la de hoy)`, ...lines].join('\n');
+const pct = (v) => `${v.toFixed(2)}%`;
+
+/** Texto y color de la celda de un combo. Vacío si no imprime. */
+function comboCell(status) {
+  if (status === null) return ['', 'muted'];
+  const [code, dist] = status;
+  switch (code) {
+    case STATE.UP: return ['↑ alcista', 'up'];
+    case STATE.CROSS_UP: return ['↑ en curso', 'up cross'];
+    case STATE.NEAR_DOWN: return [`↓ próxima ${pct(dist)}`, 'near'];
+    case STATE.NEAR_UP: return [`↑ próxima ${pct(dist)}`, 'near'];
+    case STATE.CROSS_DOWN: return ['↓ en curso', 'down cross'];
+    case STATE.DOWN: return ['↓ bajista', 'down'];
+    default: return ['', 'muted'];
+  }
+}
+
+function comboTooltip(row, i, status) {
+  const combo = COMBOS[i];
+  const fast = row.ema?.[2 * i] ?? null;
+  const slow = row.ema?.[2 * i + 1] ?? null;
+  const head = `EMA ${combo.fast} / EMA ${combo.slow} diarias (${row.kn ?? 0} velas con la de hoy)`;
+  if (status === null) return `${head}\nNo imprime: faltan velas para la EMA ${fast === null ? combo.fast : combo.slow}.`;
+  const values = `${fmtPrice(String(fast))} / ${fmtPrice(String(slow))}`;
+  const [code, dist] = status;
+  // switch y no un objeto: el % solo existe en los estados "próxima".
+  let detail;
+  switch (code) {
+    case STATE.CROSS_UP: detail = 'Ayer la rápida cerró abajo; con el precio de hoy va arriba.'; break;
+    case STATE.CROSS_DOWN: detail = 'Ayer la rápida cerró arriba; con el precio de hoy va abajo.'; break;
+    case STATE.NEAR_UP: detail = `Si el precio sube ${pct(dist)} hoy, la rápida cruza hacia arriba.`; break;
+    case STATE.NEAR_DOWN: detail = `Si el precio baja ${pct(dist)} hoy, la rápida cruza hacia abajo.`; break;
+    default: detail = `Sin cruce a menos de ${NEAR_CROSS_PCT}% de precio hoy.`;
+  }
+  return `${head}\n${values}\n${detail}`;
 }
 
 function isPartial(tfId, row) {
@@ -696,14 +722,25 @@ function wireControls() {
   bindNumberInput(dom.minVol, 'minVol');
   bindNumberInput(dom.minDelta, 'minDelta');
 
-  for (const [select, key] of [[dom.regimeFilter, 'regimeFilter'], [dom.trendFilter, 'trendFilter']]) {
-    select.value = state[key];
-    select.addEventListener('change', () => {
-      state[key] = select.value;
-      saveSettings();
-      refresh();
-    });
-  }
+  // Un selector por combo, con las opciones de COMBO_FILTERS.
+  dom.comboFilters.replaceChildren(
+    ...COMBOS.map((combo) => {
+      const label = document.createElement('label');
+      label.className = 'field';
+      label.title = `EMA ${combo.fast} contra EMA ${combo.slow} en velas diarias. Los pares donde no imprime no pasan por ninguna opción salvo "todos".`;
+      const select = document.createElement('select');
+      select.dataset.combo = combo.id;
+      for (const [value, def] of Object.entries(COMBO_FILTERS)) select.add(new Option(def.label, value));
+      select.value = state.comboFilters[combo.id] in COMBO_FILTERS ? state.comboFilters[combo.id] : 'all';
+      select.addEventListener('change', () => {
+        state.comboFilters[combo.id] = select.value;
+        saveSettings();
+        refresh();
+      });
+      label.append(document.createTextNode(`${combo.fast}/${combo.slow} `), select);
+      return label;
+    }),
+  );
 
   dom.deltaDir.value = state.deltaDir;
   dom.deltaDir.addEventListener('change', () => {

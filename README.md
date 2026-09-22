@@ -180,23 +180,29 @@ primeros N cierres, las N−1 velas anteriores vacías, y después
 descargadas; la vela de hoy está **en curso** y toma el último precio del ticker,
 en O(1) y con el mismo resultado que recalcular la serie entera.
 
-**Columna Régimen** (21/34 contra 55/115), ordenable de más alcista a más
-bajista por su número, no por el texto:
+**Una columna y un filtro por combo** (21/34, 55/115, 300/600), cada uno con
+su estado en la vela diaria de hoy. «Alcista» es rápida ≥ lenta.
 
-| Estado | Valor |
-| --- | --- |
-| R+ M+ | 3 |
-| R− M+ | 2 |
-| R+ M− | 1 |
-| R− M− | 0 |
+| Estado | Qué significa | Orden |
+| --- | --- | --- |
+| ↑ alcista | rápida arriba, sin cruce cerca | 5 |
+| ↑ en curso | ayer cerró abajo; con el precio de hoy va arriba | 4 |
+| ↓ próxima x% | alcista, pero si el precio baja menos de 5% hoy, cruza | 3 |
+| ↑ próxima x% | bajista, pero si el precio sube menos de 5% hoy, cruza | 2 |
+| ↓ en curso | ayer cerró arriba; con el precio de hoy va abajo | 1 |
+| ↓ bajista | rápida abajo, sin cruce cerca | 0 |
 
-«Alcista» es rápida ≥ lenta. El filtro ofrece los cuatro estados y dos atajos,
-*medio alcista* (3 o 2) y *medio bajista* (1 o 0).
+«Próxima» se mide por **precio**, no por distancia entre las medias: como la EMA
+de hoy es lineal en el precio (`F = aF·p + (1−aF)·F_ayer`), el precio exacto al
+que se cruzan hoy es `p* = ((1−aS)·S_ayer − (1−aF)·F_ayer) / (aF − aS)`, y el %
+mostrado es cuánto le falta al precio actual para llegar a `p*`.
 
-**Columna 300/600** (↑/↓), aparte del régimen, con su propio filtro. Una moneda
-que no llega a 600 velas diarias no tiene fondo: queda vacía y **no pasa por
-ningún lado del filtro**. Lo mismo cualquier media que no imprimió: va vacía,
-nunca con un número rellenado. Al ordenar, los vacíos quedan siempre al final.
+Cada filtro ofrece: alcista (5, 4 y 3), bajista (2, 1 y 0), cruce en curso,
+cruce alcista/bajista en curso, próximo cruce y próximo cruce alcista/bajista.
+Un combo que no imprime queda vacío y **no pasa por ninguna opción** salvo
+«todos». El día en que la vela de hoy recién completa la semilla de una EMA no
+hay «ayer» con qué comparar: ese día solo se informa alcista o bajista. Al
+ordenar, los vacíos quedan siempre al final.
 
 **Velas**: `interval=D`, `limit=1000` (un pedido por símbolo, el máximo de
 Bybit), definidos solo en `public/js/core/combos.js`. A las 00:00 UTC la vela
@@ -336,7 +342,7 @@ pares actualizándose cada segundo no ralentizan el navegador.
 npm test
 ```
 
-84 tests: EMA de Pine contra valores en forma cerrada para las seis longitudes de los combos, régimen y fondo 300/600 sobre todas las filas, matemática de las ventanas y rotación de cubos, ida y vuelta de la
+86 tests: EMA de Pine contra valores en forma cerrada para las seis longitudes de los combos; el estado de cada combo (cruce en curso y próximo) verificado en todas las filas recalculando la serie entera; matemática de las ventanas y rotación de cubos, ida y vuelta de la
 persistencia, formateo de cifras, protocolo WebSocket contra un socket falso con
 mensajes reales de Bybit (suscripción por tandas, ping, reconexión, contratos
 inversos) y la API HTTP completa levantando el servidor real, con trades

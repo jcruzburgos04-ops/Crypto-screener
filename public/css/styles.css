@@ -518,3 +518,16 @@ body {
     display: none;
   }
 }
+
+/* Combos de EMAs diarias */
+.combo-filters {
+  display: contents;
+}
+
+.cell.near {
+  color: #ffd166;
+}
+
+.cell.cross {
+  font-weight: 700;
+}
