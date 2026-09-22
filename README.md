@@ -162,6 +162,47 @@ configuración.)*
 
 ---
 
+## Combos de EMAs diarias
+
+Los tres combos de la banda diaria del indicador de Pine, anclados a 1D. Con
+velas diarias el modo Automático del Pine toma la vía exacta, así que las
+longitudes van tal cual:
+
+| Combo | Rápida / lenta | Uso |
+| --- | --- | --- |
+| 1 | 21 / 34 | el rápido, da el sesgo |
+| 2 | 55 / 115 | el medio |
+| 3 | 300 / 600 | la tendencia de fondo |
+
+**EMA de Pine, no de pandas** (`public/js/core/ema.js`): semilla = SMA de los
+primeros N cierres, las N−1 velas anteriores vacías, y después
+`p = a·x + (1−a)·p` con `a = 2/(N+1)`. Se calcula sobre **todas** las velas
+descargadas; la vela de hoy está **en curso** y toma el último precio del ticker,
+en O(1) y con el mismo resultado que recalcular la serie entera.
+
+**Columna Régimen** (21/34 contra 55/115), ordenable de más alcista a más
+bajista por su número, no por el texto:
+
+| Estado | Valor |
+| --- | --- |
+| R+ M+ | 3 |
+| R− M+ | 2 |
+| R+ M− | 1 |
+| R− M− | 0 |
+
+«Alcista» es rápida ≥ lenta. El filtro ofrece los cuatro estados y dos atajos,
+*medio alcista* (3 o 2) y *medio bajista* (1 o 0).
+
+**Columna 300/600** (↑/↓), aparte del régimen, con su propio filtro. Una moneda
+que no llega a 600 velas diarias no tiene fondo: queda vacía y **no pasa por
+ningún lado del filtro**. Lo mismo cualquier media que no imprimió: va vacía,
+nunca con un número rellenado. Al ordenar, los vacíos quedan siempre al final.
+
+**Velas**: `interval=D`, `limit=1000` (un pedido por símbolo, el máximo de
+Bybit), definidos solo en `public/js/core/combos.js`. A las 00:00 UTC la vela
+de ayer cierra y cada símbolo se recarga; mientras tanto sus medias quedan
+vacías en vez de mostrar valores de un día que ya terminó.
+
 ## La interfaz
 
 **Columnas fijas:** favorito, par, precio, variación 24h, volumen 24h.
@@ -295,7 +336,7 @@ pares actualizándose cada segundo no ralentizan el navegador.
 npm test
 ```
 
-44 tests: matemática de las ventanas y rotación de cubos, ida y vuelta de la
+84 tests: EMA de Pine contra valores en forma cerrada para las seis longitudes de los combos, régimen y fondo 300/600 sobre todas las filas, matemática de las ventanas y rotación de cubos, ida y vuelta de la
 persistencia, formateo de cifras, protocolo WebSocket contra un socket falso con
 mensajes reales de Bybit (suscripción por tandas, ping, reconexión, contratos
 inversos) y la API HTTP completa levantando el servidor real, con trades

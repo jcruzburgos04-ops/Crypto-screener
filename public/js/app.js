@@ -4,6 +4,10 @@
 
 import { TIMEFRAMES, TIMEFRAME_BY_ID, DEFAULT_TIMEFRAMES, parseTimeframes } from './timeframes.js';
 import { fmtUsd, fmtPrice, fmtPct, fmtFunding, fmtDuration, parseAmount, coinColor } from './format.js';
+import { compareSortValues } from './sorting.js';
+import {
+  COMBOS, REGIME_LABELS, passesRegimeFilter, passesTrendFilter,
+} from './core/combos.js';
 
 const ROW_H = 36;
 const OVERSCAN = 6;
@@ -18,6 +22,9 @@ const dom = {
   minVol: $('min-vol'),
   minDelta: $('min-delta'),
   deltaDir: $('delta-dir'),
+  regimeFilter: $('regime-filter'),
+  trendFilter: $('trend-filter'),
+  klines: $('klines'),
   tfOptions: $('tf-options'),
   thead: $('thead'),
   viewport: $('viewport'),
@@ -53,6 +60,8 @@ const state = {
   minVol: saved.minVol ?? 0,
   minDelta: saved.minDelta ?? 0,
   deltaDir: saved.deltaDir ?? 'all',
+  regimeFilter: saved.regimeFilter ?? 'all',
+  trendFilter: saved.trendFilter ?? 'all',
 
   rows: [],
   visible: [],
@@ -93,6 +102,8 @@ function saveSettings() {
     minVol: state.minVol,
     minDelta: state.minDelta,
     deltaDir: state.deltaDir,
+    regimeFilter: state.regimeFilter,
+    trendFilter: state.trendFilter,
     maxSymbols: state.maxSymbols,
   };
   try {
@@ -111,6 +122,9 @@ function buildColumns() {
     { id: 'price', label: 'Precio', kind: 'price', width: '112px', num: true, sortValue: (r) => Number(r.p) || 0 },
     { id: 'chg', label: '24h %', kind: 'chg', width: '86px', num: true, sortValue: (r) => r.c },
     { id: 'vol24', label: 'Vol 24h', kind: 'usd', width: '108px', num: true, sortValue: (r) => r.v },
+    // Régimen 21/34 contra 55/115: se ordena por el número (3 → 0), no por el texto.
+    { id: 'regime', label: 'Régimen', kind: 'regime', width: '82px', sortValue: (r) => r.rg ?? null },
+    { id: 'trend', label: '300/600', kind: 'trend', width: '66px', sortValue: (r) => r.fd ?? null },
   ];
 
   for (const id of state.activeTfs) {
@@ -240,6 +254,8 @@ function refresh() {
     if (state.deltaDir === 'buy' && delta <= 0) continue;
     if (state.deltaDir === 'sell' && delta >= 0) continue;
     if (minDelta > 0 && Math.abs(delta) < minDelta) continue;
+    if (!passesRegimeFilter(row.rg ?? null, state.regimeFilter)) continue;
+    if (!passesTrendFilter(row.fd ?? null, state.trendFilter)) continue;
     visible.push(row);
   }
 
@@ -252,13 +268,8 @@ function refresh() {
       const fb = favs.has(b.s);
       if (fa !== fb) return fa ? -1 : 1;
     }
-    const va = column.sortValue(a);
-    const vb = column.sortValue(b);
-    if (typeof va === 'string' || typeof vb === 'string') {
-      return String(va).localeCompare(String(vb)) * dir;
-    }
-    if (va === vb) return a.s.localeCompare(b.s);
-    return (va < vb ? -1 : 1) * dir;
+    const cmp = compareSortValues(column.sortValue(a), column.sortValue(b), dir);
+    return cmp !== 0 ? cmp : a.s.localeCompare(b.s);
   });
 
   state.visible = visible;
@@ -438,9 +449,30 @@ function paintCell(cell, col, row, isFav) {
       setCell(cell, fmtFunding(row.f), row.f > 0 ? 'up' : row.f < 0 ? 'down' : 'muted');
       break;
     }
+    case 'regime': {
+      const rg = row.rg ?? null;
+      const cls = rg === 3 ? 'up' : rg === 0 ? 'down' : rg === null ? 'muted' : '';
+      setCell(cell, rg === null ? '' : REGIME_LABELS[rg], cls);
+      cell.title = emaTooltip(row);
+      break;
+    }
+    case 'trend': {
+      const fd = row.fd ?? null;
+      setCell(cell, fd === null ? '' : fd === 1 ? '↑' : '↓', fd === 1 ? 'up' : fd === 0 ? 'down' : 'muted');
+      cell.title = fd === null ? `Sin EMA 600: ${row.kn ?? 0} velas diarias` : emaTooltip(row);
+      break;
+    }
     default:
       break;
   }
+}
+
+/** Valores de las EMAs diarias; las que no imprimieron se muestran como tales. */
+function emaTooltip(row) {
+  if (!row.ema) return '';
+  const fmt = (v) => (v === null ? 'no imprime' : fmtPrice(String(v)));
+  const lines = COMBOS.map((c, i) => `${c.fast}/${c.slow}: ${fmt(row.ema[2 * i])} / ${fmt(row.ema[2 * i + 1])}`);
+  return [`${row.kn ?? 0} velas diarias (con la de hoy)`, ...lines].join('\n');
 }
 
 function isPartial(tfId, row) {
@@ -543,6 +575,11 @@ function updateStatusBar(snap) {
   dom.statusDot.classList.toggle('down', !live);
   dom.statusText.textContent = live ? 'en vivo' : 'datos no actualizados';
   dom.coverage.textContent = `historial acumulado: ${fmtDuration(snap.cov)}`;
+  if (snap.klines) {
+    const { loaded, total } = snap.klines;
+    dom.klines.textContent = loaded < total ? `medias diarias: ${loaded}/${total} pares cargados` : `medias diarias: ${total} pares`;
+    dom.klines.classList.toggle('stale', loaded < total);
+  }
   updateBanner();
 }
 
@@ -658,6 +695,15 @@ function wireControls() {
   dom.minDelta.value = state.minDelta ? String(state.minDelta) : '';
   bindNumberInput(dom.minVol, 'minVol');
   bindNumberInput(dom.minDelta, 'minDelta');
+
+  for (const [select, key] of [[dom.regimeFilter, 'regimeFilter'], [dom.trendFilter, 'trendFilter']]) {
+    select.value = state[key];
+    select.addEventListener('change', () => {
+      state[key] = select.value;
+      saveSettings();
+      refresh();
+    });
+  }
 
   dom.deltaDir.value = state.deltaDir;
   dom.deltaDir.addEventListener('change', () => {

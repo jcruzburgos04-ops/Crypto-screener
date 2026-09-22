@@ -1,6 +1,6 @@
 // Fuente de datos real: REST para instrumentos y tickers, WebSocket para trades.
 
-import { fetchInstruments, fetchTickers } from './bybit-rest.js';
+import { fetchDailyKlines, fetchInstruments, fetchTickers } from './bybit-rest.js';
 import { TradeStream } from './trade-stream.js';
 
 export function createBybitSource(config) {
@@ -13,6 +13,10 @@ export function createBybitSource(config) {
 
     loadTickers() {
       return fetchTickers(config);
+    },
+
+    loadDailyKlines(symbol, category = 'linear') {
+      return fetchDailyKlines(config, category, symbol);
     },
 
     createStream({ category, onTrade, onLog }) {

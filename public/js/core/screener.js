@@ -6,6 +6,11 @@
 // inyecta (`persistence`) y puede no existir.
 
 import { VolumeStore } from './volume-store.js';
+import { pineEmaLive, pineEmaState } from './ema.js';
+import { DAY_MS, EMA_LENGTHS, evaluateCombos } from './combos.js';
+
+const EMPTY_EMAS = EMA_LENGTHS.map(() => null);
+const round = (x) => (x === null ? null : Number(x.toPrecision(10)));
 
 export class Screener {
   constructor({ config, source, log = () => {}, persistence = null }) {
@@ -30,6 +35,15 @@ export class Screener {
     this.timers = [];
     this.stopped = false;
     this.persistedTrades = -1;
+
+    // Velas diarias por símbolo para los combos de EMAs.
+    /** @type {Map<string, {day:number, states:object[], count:number, todayClose:number}>} */
+    this.klines = new Map();
+    this.klineQueue = [];
+    this.klineQueued = new Set();
+    this.klineInFlight = 0;
+    this.klineErrors = 0;
+    this.klineWaiters = [];
   }
 
   async start() {
@@ -52,7 +66,10 @@ export class Screener {
     this.#every(this.config.instrumentsIntervalMs, () => this.#refreshInstruments());
     // Rotar los cubos aunque no llegue ningún trade: si no, un mercado parado
     // seguiría mostrando delta viejo.
-    this.#every(1000, () => this.store.advance());
+    this.#every(1000, () => {
+      this.store.advance();
+      this.#checkDayRollover();
+    });
     if (this.persistence) {
       this.#every(this.config.snapshotIntervalMs, () => this.#persist());
     }
@@ -109,6 +126,7 @@ export class Screener {
         d: deltas,
         cov: entry ? Math.max(0, now - Math.max(entry.since, this.store.startedAt)) : 0,
         lt: entry?.lastTradeMs ? Math.round((now - entry.lastTradeMs) / 1000) : null,
+        ...this.#combosFor(inst.symbol, ticker, now),
       });
     }
 
@@ -130,6 +148,7 @@ export class Screener {
       tickersFresh,
       tickerAgeMs,
       instruments: this.instruments.size,
+      klines: { loaded: this.#klinesLoaded(now), total: this.instruments.size },
       trades: this.store.trades,
       lastError: this.lastError,
       rows,
@@ -150,6 +169,11 @@ export class Screener {
       lastError: this.lastError,
       trades: this.store.trades,
       droppedTrades: this.store.droppedTrades,
+      klines: {
+        loaded: this.#klinesLoaded(now),
+        pending: this.klineQueue.length + this.klineInFlight,
+        errors: this.klineErrors,
+      },
       symbolsWithTrades: this.store.size,
       streams: [...this.streams.values()].map((s) => s.status()),
       memoryMB:
@@ -157,6 +181,99 @@ export class Screener {
           ? Math.round(process.memoryUsage().rss / 1e6)
           : null,
     };
+  }
+
+  /** Resuelve cuando no queda ninguna descarga de velas pendiente. */
+  waitForKlines() {
+    if (this.klineQueue.length === 0 && this.klineInFlight === 0) return Promise.resolve();
+    return new Promise((resolve) => this.klineWaiters.push(resolve));
+  }
+
+  /**
+   * Valores de los combos para un símbolo. La EMA se calcula sobre TODAS las
+   * velas descargadas; la vela de hoy (en curso) toma el último precio.
+   * Todo lo que no imprime va null, nunca un número rellenado.
+   */
+  #combosFor(symbol, ticker, now) {
+    const data = this.klines.get(symbol);
+    const today = Math.floor(now / DAY_MS) * DAY_MS;
+    // Sin velas, o con velas de un día que ya cerró y aún no se recargó.
+    if (!data || data.day !== today) return { ema: EMPTY_EMAS, rg: null, fd: null, kn: null };
+
+    const tickerPrice = Number(ticker?.price);
+    const live = Number.isFinite(tickerPrice) && tickerPrice > 0 ? tickerPrice : data.todayClose;
+    const emas = data.states.map((state) => round(pineEmaLive(state, live)));
+    return { ...evaluateCombos(emas), kn: data.count + (Number.isFinite(live) ? 1 : 0) };
+  }
+
+  #klinesLoaded(now) {
+    const today = Math.floor(now / DAY_MS) * DAY_MS;
+    let n = 0;
+    for (const [symbol, data] of this.klines) if (data.day === today && this.instruments.has(symbol)) n++;
+    return n;
+  }
+
+  #queueKlines(symbol) {
+    if (!this.source.loadDailyKlines || this.klineQueued.has(symbol) || this.stopped) return;
+    this.klineQueued.add(symbol);
+    this.klineQueue.push(symbol);
+    this.#pumpKlines();
+  }
+
+  #pumpKlines() {
+    const concurrency = this.config.klineConcurrency ?? 4;
+    while (this.klineInFlight < concurrency && this.klineQueue.length > 0 && !this.stopped) {
+      const symbol = this.klineQueue.shift();
+      this.klineInFlight++;
+      this.#loadKlines(symbol).finally(() => {
+        this.klineQueued.delete(symbol);
+        this.klineInFlight--;
+        // Espaciado entre pedidos para no rozar el límite de la API pública.
+        // Sin unref: solo existe mientras queda cola, y tiene que poder terminarla.
+        setTimeout(() => this.#pumpKlines(), this.config.klineSpacingMs ?? 150);
+        if (this.klineQueue.length === 0 && this.klineInFlight === 0) {
+          for (const resolve of this.klineWaiters.splice(0)) resolve();
+        }
+      });
+    }
+  }
+
+  async #loadKlines(symbol) {
+    const inst = this.instruments.get(symbol);
+    if (!inst) return;
+    let candles;
+    try {
+      candles = await this.source.loadDailyKlines(symbol, inst.category);
+    } catch (err) {
+      this.klineErrors++;
+      this.lastError = `velas ${symbol}: ${err.message}`;
+      this.log('warn', this.lastError);
+      const retry = setTimeout(() => this.#queueKlines(symbol), 60_000);
+      retry.unref?.();
+      return;
+    }
+    const now = Date.now();
+    const today = Math.floor(now / DAY_MS) * DAY_MS;
+    const closed = [];
+    let todayClose = NaN;
+    for (const candle of candles) {
+      if (candle.start < today) closed.push(candle.close);
+      else if (candle.start === today) todayClose = candle.close;
+    }
+    this.klines.set(symbol, {
+      day: today,
+      count: closed.length,
+      todayClose,
+      states: EMA_LENGTHS.map((length) => pineEmaState(closed, length)),
+    });
+  }
+
+  /** A las 00:00 UTC la vela de ayer cierra: hay que recargar cada símbolo. */
+  #checkDayRollover() {
+    const today = Math.floor(Date.now() / DAY_MS) * DAY_MS;
+    for (const [symbol, data] of this.klines) {
+      if (data.day !== today) this.#queueKlines(symbol);
+    }
   }
 
   #every(intervalMs, fn) {
@@ -208,6 +325,9 @@ export class Screener {
     const added = [...next.keys()].filter((s) => !previous.has(s));
     const removed = [...previous].filter((s) => !next.has(s));
     this.instruments = next;
+
+    for (const symbol of removed) this.klines.delete(symbol);
+    for (const inst of next.values()) if (!this.klines.has(inst.symbol)) this.#queueKlines(inst.symbol);
 
     if (added.length > 0 || removed.length > 0) {
       if (previous.size > 0) {

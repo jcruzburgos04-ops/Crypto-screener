@@ -7,6 +7,8 @@
 // El delta de volumen NO sale de aquí: las velas de Bybit no traen el desglose
 // comprador/vendedor. Eso lo aporta el WebSocket de trades.
 
+import { KLINE_INTERVAL, KLINE_LIMIT } from './combos.js';
+
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 export class BybitApiError extends Error {
@@ -120,4 +122,23 @@ export async function fetchTickers(config, options = {}) {
     }
   }
   return tickers;
+}
+
+/**
+ * Velas diarias de un símbolo, de la más vieja a la más nueva, incluida la
+ * vela en curso. Intervalo y cantidad salen de combos.js y de ningún otro lado.
+ * @returns {Promise<Array<{start:number, close:number}>>}
+ */
+export async function fetchDailyKlines(config, category, symbol, options = {}) {
+  const result = await fetchBybit(
+    config.restUrl,
+    '/v5/market/kline',
+    { category, symbol, interval: KLINE_INTERVAL, limit: KLINE_LIMIT },
+    options,
+  );
+  // Bybit las devuelve de la más nueva a la más vieja: [start, o, h, l, c, vol, turnover]
+  return (result.list ?? [])
+    .map((row) => ({ start: Number(row[0]), close: Number(row[4]) }))
+    .filter((k) => Number.isFinite(k.start) && Number.isFinite(k.close))
+    .sort((a, b) => a.start - b.start);
 }
