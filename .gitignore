@@ -4,3 +4,5 @@ data/*.json
 *.log
 .DS_Store
 .env
+research/cache/
+research/out/
