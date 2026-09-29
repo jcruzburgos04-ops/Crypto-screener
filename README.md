@@ -204,6 +204,26 @@ Un combo que no imprime queda vacío y **no pasa por ninguna opción** salvo
 hay «ayer» con qué comparar: ese día solo se informa alcista o bajista. Al
 ordenar, los vacíos quedan siempre al final.
 
+**Velas desde el último cruce.** Cada celda muestra cuánto hace que la rápida
+y la lenta se cruzaron por última vez, contando **la vela de hoy como 0**, la
+de ayer como 1, y así: `↑ alcista · 12v` es alcista desde el cruce de hace 12
+velas. El tooltip da la fecha (UTC) de esa vela. Junto al selector de cada combo
+hay un rango **«cruce hace [de] a [hasta] velas»**; vacío = sin límite, y se
+combina con el estado (p. ej. *alcista* + *hasta 5* = cruce alcista en las
+últimas 5 velas).
+
+Si en todas las velas donde existen las dos EMAs nunca se cruzaron, no se sabe
+cuándo fue el último cruce, solo un mínimo: la celda muestra `≥400v`. Ese combo
+pasa un filtro «de N» si el mínimo ya alcanza, pero **nunca pasa un tope**
+(«hasta N»), porque el cruce pudo ser hace N+1 velas o hace mil.
+
+**Paridad con TradingView.** TradingView calcula la EMA desde la primera vela
+del par; acá, desde la primera de las 1000 descargadas. La diferencia de
+semilla se diluye como (1−a)^k: en 21/34 y 55/115 es nula, pero en las monedas
+con más de 1000 velas diarias la EMA 300 conserva ~0,9 % y la **EMA 600 ~26 %**
+de esa diferencia. En monedas más jóvenes se descarga su historia completa y
+coinciden.
+
 **Velas**: `interval=D`, `limit=1000` (un pedido por símbolo, el máximo de
 Bybit), definidos solo en `public/js/core/combos.js`. A las 00:00 UTC la vela
 de ayer cierra y cada símbolo se recarga; mientras tanto sus medias quedan
@@ -342,7 +362,7 @@ pares actualizándose cada segundo no ralentizan el navegador.
 npm test
 ```
 
-86 tests: EMA de Pine contra valores en forma cerrada para las seis longitudes de los combos; el estado de cada combo (cruce en curso y próximo) verificado en todas las filas recalculando la serie entera; matemática de las ventanas y rotación de cubos, ida y vuelta de la
+91 tests: EMA de Pine contra valores en forma cerrada para las seis longitudes de los combos; el estado de cada combo (cruce en curso y próximo) y las velas desde el último cruce, verificados en todas las filas recalculando la serie entera; matemática de las ventanas y rotación de cubos, ida y vuelta de la
 persistencia, formateo de cifras, protocolo WebSocket contra un socket falso con
 mensajes reales de Bybit (suscripción por tandas, ping, reconexión, contratos
 inversos) y la API HTTP completa levantando el servidor real, con trades

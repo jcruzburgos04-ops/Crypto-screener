@@ -6,8 +6,8 @@
 // inyecta (`persistence`) y puede no existir.
 
 import { VolumeStore } from './volume-store.js';
-import { pineEmaLive, pineEmaState } from './ema.js';
-import { COMBOS, DAY_MS, EMA_LENGTHS, comboStatus } from './combos.js';
+import { pineEma, pineEmaLive, pineEmaState } from './ema.js';
+import { COMBOS, DAY_MS, EMA_LENGTHS, comboBull, comboStatus, crossAge, scanClosedCrosses } from './combos.js';
 
 const EMPTY_EMAS = EMA_LENGTHS.map(() => null);
 const EMPTY_COMBOS = COMBOS.map(() => null);
@@ -204,10 +204,15 @@ export class Screener {
     const tickerPrice = Number(ticker?.price);
     const live = Number.isFinite(tickerPrice) && tickerPrice > 0 ? tickerPrice : data.todayClose;
     const raw = data.states.map((state) => pineEmaLive(state, live));
-    // cb[i] = [estado, % que le falta al precio para cruzar hoy] o null si no imprime.
-    const cb = COMBOS.map((_, i) =>
-      comboStatus(data.states[2 * i], data.states[2 * i + 1], raw[2 * i], raw[2 * i + 1], live),
-    );
+    // cb[i] = [estado, % que le falta al precio para cruzar hoy,
+    //         velas desde el último cruce (hoy = 0), 1 si esa cifra es solo un mínimo]
+    // o null si el combo no imprime.
+    const cb = COMBOS.map((_, i) => {
+      const status = comboStatus(data.states[2 * i], data.states[2 * i + 1], raw[2 * i], raw[2 * i + 1], live);
+      if (status === null) return null;
+      const [age, isMinimum] = crossAge(data.crosses[i], data.count, comboBull(raw[2 * i], raw[2 * i + 1]));
+      return [...status, age, isMinimum ? 1 : 0];
+    });
     return { ema: raw.map(round), cb, kn: data.count + (Number.isFinite(live) ? 1 : 0) };
   }
 
@@ -270,6 +275,8 @@ export class Screener {
       count: closed.length,
       todayClose,
       states: EMA_LENGTHS.map((length) => pineEmaState(closed, length)),
+      // Último cruce de cada combo entre las velas cerradas (una sola pasada).
+      crosses: COMBOS.map((c) => scanClosedCrosses(pineEma(closed, c.fast), pineEma(closed, c.slow))),
     });
   }
 

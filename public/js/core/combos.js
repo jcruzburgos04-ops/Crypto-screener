@@ -81,6 +81,61 @@ export function comboStatus(fastState, slowState, fast, slow, live) {
   return [now ? STATE.UP : STATE.DOWN, null];
 }
 
+/**
+ * Recorre las velas CERRADAS una vez y anota dónde fue el último cruce.
+ * Usa comboBull, el mismo criterio de "alcista" que el resto del screener.
+ * @param {ArrayLike<number>} fastSeries pineEma de la rápida sobre las cerradas
+ * @param {ArrayLike<number>} slowSeries pineEma de la lenta sobre las cerradas
+ * @returns {{lastCross:number, lastBull:boolean|null, firstBoth:number}}
+ *   lastCross: índice de la última vela donde cambió de lado (-1 si nunca);
+ *   lastBull: lado al cierre de ayer (null si la lenta aún no imprimía);
+ *   firstBoth: primera vela con las dos EMAs impresas (-1 si ninguna).
+ */
+export function scanClosedCrosses(fastSeries, slowSeries) {
+  let lastCross = -1;
+  let firstBoth = -1;
+  let prev = null;
+  for (let t = 0; t < slowSeries.length; t++) {
+    const bull = comboBull(fastSeries[t], slowSeries[t]);
+    if (bull === null) continue;
+    if (firstBoth === -1) firstBoth = t;
+    else if (bull !== prev) lastCross = t;
+    prev = bull;
+  }
+  return { lastCross, lastBull: prev, firstBoth };
+}
+
+/**
+ * Velas desde el último cruce, con la vela de hoy (en curso) = 0, ayer = 1…
+ * Si no se vio ningún cruce, la edad es solo un MÍNIMO: no hubo cruce en las
+ * últimas `edad` velas, pero no se sabe cuándo fue el anterior.
+ * @param {object} scan resultado de scanClosedCrosses
+ * @param {number} closedCount cantidad de velas cerradas (= índice de la de hoy)
+ * @param {boolean} nowBull lado de hoy
+ * @returns {[number, boolean]} [edad, esMinimo]
+ */
+export function crossAge(scan, closedCount, nowBull) {
+  const today = closedCount;
+  if (scan.lastBull !== null && scan.lastBull !== nowBull) return [0, false]; // cruza hoy
+  if (scan.lastCross >= 0) return [today - scan.lastCross, false];
+  const first = scan.firstBoth === -1 ? today : scan.firstBoth; // -1: la lenta imprime recién hoy
+  return [today - first, true];
+}
+
+/**
+ * Filtro por antigüedad del último cruce: rango [min, max] en velas.
+ * Sin límites no filtra. Con límites, un combo sin dato no pasa; y uno sin
+ * cruce a la vista (edad = mínimo) solo pasa si el mínimo alcanza para
+ * afirmarlo: nunca con un tope, porque no se sabe cuán viejo es.
+ */
+export function passesCrossAgeFilter(status, min = 0, max = Infinity) {
+  if (min <= 0 && max === Infinity) return true;
+  if (status === null || status === undefined) return false;
+  const [, , age, isMinimum] = status;
+  if (isMinimum) return max === Infinity && age >= min;
+  return age >= min && age <= max;
+}
+
 /** Opciones del filtro de cada combo. Un combo sin dato no pasa por ninguna, salvo "todos". */
 export const COMBO_FILTERS = {
   all: { label: 'todos', accepts: null },

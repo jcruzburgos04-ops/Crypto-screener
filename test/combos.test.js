@@ -4,7 +4,7 @@ import { Screener } from '../public/js/core/screener.js';
 import { pineEma } from '../public/js/core/ema.js';
 import {
   COMBOS, COMBO_FILTERS, DAY_MS, EMA_LENGTHS, KLINE_LIMIT, NEAR_CROSS_PCT, STATE,
-  comboBull, comboStatus, crossPrice, passesComboFilter,
+  comboBull, comboStatus, crossPrice, passesComboFilter, passesCrossAgeFilter,
 } from '../public/js/core/combos.js';
 import { pineEmaState } from '../public/js/core/ema.js';
 import { compareSortValues } from '../public/js/sorting.js';
@@ -54,6 +54,26 @@ function expectedStatus(closed, live, c) {
   const moved = live * (now ? 1 - SPEC_NEAR_PCT / 100 : 1 + SPEC_NEAR_PCT / 100);
   if (bullAt(closed, moved, c) !== now) return { code: now ? STATE.NEAR_DOWN : STATE.NEAR_UP, near: true, now };
   return { code: now ? STATE.UP : STATE.DOWN };
+}
+
+/**
+ * Velas desde el último cruce, recalculando la serie ENTERA (cerradas + hoy) y
+ * buscando hacia atrás con ">=" literal. Hoy = 0. Sin cruce a la vista, la
+ * edad es un mínimo: cuántas velas hacia atrás se pudo mirar.
+ */
+function expectedAge(closed, live, c) {
+  const full = [...closed, live];
+  const f = pineEma(full, c.fast);
+  const sl = pineEma(full, c.slow);
+  const today = full.length - 1;
+  const defined = (t) => !Number.isNaN(f[t]) && !Number.isNaN(sl[t]);
+  if (!defined(today)) return null;
+  for (let t = today; t > 0 && defined(t - 1); t--) {
+    if ((f[t] >= sl[t]) !== (f[t - 1] >= sl[t - 1])) return { age: today - t, minimum: false };
+  }
+  let first = today;
+  while (first > 0 && defined(first - 1)) first--;
+  return { age: today - first, minimum: true };
 }
 
 // ---------------------------------------------------------------- universo
@@ -124,6 +144,36 @@ for (let i = 0; i < 192; i++) {
     }
   }
   const symbol = `T${i}USDT`;
+  SYMBOLS.push(symbol);
+  series.set(symbol, closed);
+  livePrice.set(symbol, live);
+}
+
+// Cruces forzados en la vela de AYER (hace 1 vela) en los tres combos y en las
+// dos direcciones: sin esto, "hace 1 vela" podría no aparecer nunca.
+for (let j = 0; j < 36; j++) {
+  const combo = COMBOS[j % 3];
+  const wantBullBefore = Math.floor(j / 3) % 2 === 0; // lado de anteayer
+  let seed = 90_000 + j * 131;
+  let closed;
+  let target = null;
+  for (let tries = 0; tries < 3000; tries++) {
+    ({ closed } = randomWalk(seed++, 999));
+    const prefix = closed.slice(0, -1); // hasta anteayer
+    if ((lastEma(prefix, combo.fast) >= lastEma(prefix, combo.slow)) !== wantBullBefore) continue;
+    target = bisectCross(prefix, combo);
+    const last = prefix.at(-1);
+    if (target !== null && target < last * 3 && target > last / 3) break;
+    target = null;
+  }
+  if (target === null) continue;
+  // Ayer cierra del otro lado del precio de cruce: cruce en la vela de ayer.
+  closed[closed.length - 1] = wantBullBefore ? target * 0.995 : target * 1.005;
+  // Hoy se queda del lado de ayer, lejos de volver a cruzar.
+  const bullYesterday = !wantBullBefore;
+  const again = bisectCross(closed, combo);
+  const live = again === null ? closed.at(-1) : bullYesterday ? again * 1.06 : again / 1.06;
+  const symbol = `Y${j}USDT`;
   SYMBOLS.push(symbol);
   series.set(symbol, closed);
   livePrice.set(symbol, live);
@@ -309,6 +359,76 @@ test('el umbral de "próxima" es el de la especificación, y hay casos entre 5% 
     });
   }
   assert.ok(between > 0, 'sin casos entre 5% y 10% no se distingue el umbral');
+});
+
+test('velas desde el último cruce: correcto en TODAS las filas y los tres combos', () => {
+  for (const row of rows) {
+    const closed = series.get(row.s);
+    const live = livePrice.get(row.s);
+    COMBOS.forEach((c, i) => {
+      const exp = expectedAge(closed, live, c);
+      const got = row.cb[i];
+      const where = `${row.s} ${c.fast}/${c.slow}`;
+      if (exp === null) return assert.equal(got, null, where);
+      assert.equal(got[2], exp.age, `${where}: velas desde el cruce`);
+      assert.equal(got[3], exp.minimum ? 1 : 0, `${where}: ¿es solo un mínimo?`);
+    });
+  }
+});
+
+test('hay cruces de hoy, de ayer, viejos y combos sin cruce a la vista', () => {
+  COMBOS.forEach((c, i) => {
+    const st = rows.map((r) => r.cb[i]).filter(Boolean);
+    const where = `${c.fast}/${c.slow}`;
+    assert.ok(st.some((x) => x[3] === 0 && x[2] === 0), `${where}: falta cruce hace 0 velas`);
+    assert.ok(st.some((x) => x[3] === 0 && x[2] === 1), `${where}: falta cruce hace 1 vela`);
+    assert.ok(st.some((x) => x[3] === 0 && x[2] > 10), `${where}: falta cruce viejo`);
+    assert.ok(st.some((x) => x[3] === 1 && x[2] > 0), `${where}: falta combo sin cruce a la vista`);
+    assert.ok(st.some((x) => x[3] === 1 && x[2] === 0), `${where}: falta el día en que la lenta recién imprime`);
+  });
+});
+
+test('cruce hace 0 velas es exactamente lo mismo que "en curso"', () => {
+  for (const row of rows) {
+    row.cb.forEach((st, i) => {
+      if (st === null) return;
+      const enCurso = st[0] === STATE.CROSS_UP || st[0] === STATE.CROSS_DOWN;
+      assert.equal(enCurso, st[2] === 0 && st[3] === 0, `${row.s} combo ${i + 1}`);
+    });
+  }
+});
+
+test('filtro por velas desde el cruce: cada rango cuenta lo que debe', () => {
+  COMBOS.forEach((c, i) => {
+    const st = rows.map((r) => r.cb[i]);
+    const count = (min, max) => st.filter((x) => passesCrossAgeFilter(x, min, max)).length;
+    const exact = (pred) => st.filter((x) => x && x[3] === 0 && pred(x[2])).length;
+    const minimum = (pred) => st.filter((x) => x && x[3] === 1 && pred(x[2])).length;
+    const where = `${c.fast}/${c.slow}`;
+
+    // Sin límites no filtra nada, ni siquiera los vacíos.
+    assert.equal(count(0, Infinity), rows.length, where);
+    // Con tope: solo cruces vistos dentro del rango; un mínimo nunca se afirma con tope.
+    assert.equal(count(0, 5), exact((a) => a <= 5), where);
+    assert.equal(count(3, 10), exact((a) => a >= 3 && a <= 10), where);
+    assert.equal(count(0, 0), exact((a) => a === 0), where);
+    // Solo mínimo: los cruces viejos, y los combos sin cruce cuyo mínimo ya alcanza.
+    assert.equal(count(20, Infinity), exact((a) => a >= 20) + minimum((a) => a >= 20), where);
+    assert.ok(minimum((a) => a < 20) > 0, `${where}: tiene que haber mínimos que NO alcancen`);
+    // Rango vacío.
+    assert.equal(count(10, 3), 0, where);
+    // Un vacío no pasa ningún filtro activo.
+    assert.equal(passesCrossAgeFilter(null, 0, 5), false);
+    assert.equal(passesCrossAgeFilter(null, 20, Infinity), false);
+  });
+});
+
+test('un mínimo jamás pasa un tope, aunque el tope sea mayor que el mínimo', () => {
+  // Sin cruce en las últimas 7 velas: pudo ser hace 8 o hace 800.
+  assert.equal(passesCrossAgeFilter([STATE.UP, null, 7, 1], 0, 100), false);
+  assert.equal(passesCrossAgeFilter([STATE.UP, null, 7, 1], 5, Infinity), true);
+  assert.equal(passesCrossAgeFilter([STATE.UP, null, 7, 1], 8, Infinity), false);
+  assert.equal(passesCrossAgeFilter([STATE.UP, null, 7, 0], 0, 100), true);
 });
 
 test('el período de descarga alcanza para la EMA más larga', () => {

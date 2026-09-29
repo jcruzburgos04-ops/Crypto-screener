@@ -6,7 +6,7 @@ import { TIMEFRAMES, TIMEFRAME_BY_ID, DEFAULT_TIMEFRAMES, parseTimeframes } from
 import { fmtUsd, fmtPrice, fmtPct, fmtFunding, fmtDuration, parseAmount, coinColor } from './format.js';
 import { compareSortValues } from './sorting.js';
 import {
-  COMBOS, COMBO_FILTERS, NEAR_CROSS_PCT, STATE, passesComboFilter,
+  COMBOS, COMBO_FILTERS, DAY_MS, NEAR_CROSS_PCT, STATE, passesComboFilter, passesCrossAgeFilter,
 } from './core/combos.js';
 
 const ROW_H = 36;
@@ -61,6 +61,10 @@ const state = {
   deltaDir: saved.deltaDir ?? 'all',
   // Filtro por combo diario: { c1: 'all' | 'bull' | 'crossUp' | … }
   comboFilters: { ...Object.fromEntries(COMBOS.map((c) => [c.id, 'all'])), ...(saved.comboFilters ?? {}) },
+  // Rango de velas desde el último cruce, por combo: { c1: { min: 0, max: Infinity } }
+  crossAge: Object.fromEntries(
+    COMBOS.map((c) => [c.id, { min: saved.crossAge?.[c.id]?.min ?? 0, max: saved.crossAge?.[c.id]?.max ?? null }]),
+  ),
 
   rows: [],
   visible: [],
@@ -102,6 +106,7 @@ function saveSettings() {
     minDelta: state.minDelta,
     deltaDir: state.deltaDir,
     comboFilters: state.comboFilters,
+    crossAge: state.crossAge,
     maxSymbols: state.maxSymbols,
   };
   try {
@@ -126,7 +131,7 @@ function buildColumns() {
       label: `${combo.fast}/${combo.slow}`,
       kind: 'combo',
       index: i,
-      width: '138px',
+      width: '172px',
       sortValue: (r) => r.cb?.[i]?.[0] ?? null,
     })),
   ];
@@ -259,6 +264,12 @@ function refresh() {
     if (state.deltaDir === 'sell' && delta >= 0) continue;
     if (minDelta > 0 && Math.abs(delta) < minDelta) continue;
     if (!COMBOS.every((c, i) => passesComboFilter(row.cb?.[i]?.[0] ?? null, state.comboFilters[c.id]))) continue;
+    if (
+      !COMBOS.every((c, i) => {
+        const { min, max } = state.crossAge[c.id];
+        return passesCrossAgeFilter(row.cb?.[i] ?? null, min, max ?? Infinity);
+      })
+    ) continue;
     visible.push(row);
   }
 
@@ -466,19 +477,42 @@ function paintCell(cell, col, row, isFav) {
 
 const pct = (v) => `${v.toFixed(2)}%`;
 
+/** "· 12v" si se vio el cruce; "· ≥400v" si no hubo cruce en todo lo que se ve. */
+function ageSuffix(status) {
+  const [, , age, isMinimum] = status;
+  if (age === 0) return ''; // hoy: ya lo dice "en curso"
+  return isMinimum ? ` · ≥${age}v` : ` · ${age}v`;
+}
+
 /** Texto y color de la celda de un combo. Vacío si no imprime. */
 function comboCell(status) {
   if (status === null) return ['', 'muted'];
   const [code, dist] = status;
+  const age = ageSuffix(status);
   switch (code) {
-    case STATE.UP: return ['↑ alcista', 'up'];
+    case STATE.UP: return [`↑ alcista${age}`, 'up'];
     case STATE.CROSS_UP: return ['↑ en curso', 'up cross'];
-    case STATE.NEAR_DOWN: return [`↓ próxima ${pct(dist)}`, 'near'];
-    case STATE.NEAR_UP: return [`↑ próxima ${pct(dist)}`, 'near'];
+    case STATE.NEAR_DOWN: return [`↓ próxima ${pct(dist)}${age}`, 'near'];
+    case STATE.NEAR_UP: return [`↑ próxima ${pct(dist)}${age}`, 'near'];
     case STATE.CROSS_DOWN: return ['↓ en curso', 'down cross'];
-    case STATE.DOWN: return ['↓ bajista', 'down'];
+    case STATE.DOWN: return [`↓ bajista${age}`, 'down'];
     default: return ['', 'muted'];
   }
+}
+
+/** Fecha (UTC) de la vela que está `age` velas antes de la de hoy. */
+function candleDate(age) {
+  const today = Math.floor(Date.now() / DAY_MS) * DAY_MS;
+  return new Date(today - age * DAY_MS).toISOString().slice(0, 10);
+}
+
+function ageLine(status, combo) {
+  const [code, , age, isMinimum] = status;
+  const lado = code >= STATE.NEAR_DOWN ? 'alcista' : 'bajista';
+  if (age === 0 && !isMinimum) return `Último cruce: ${lado}, en la vela de hoy (0 velas).`;
+  if (isMinimum && age === 0) return `La EMA ${combo.slow} recién imprime hoy: todavía no hay cruces que mirar.`;
+  if (isMinimum) return `Sin cruce en las últimas ${age} velas (desde que existe la EMA ${combo.slow}); el anterior no se ve en las velas descargadas.`;
+  return `Último cruce: ${lado}, hace ${age} ${age === 1 ? 'vela' : 'velas'} (vela del ${candleDate(age)} UTC).`;
 }
 
 function comboTooltip(row, i, status) {
@@ -498,7 +532,7 @@ function comboTooltip(row, i, status) {
     case STATE.NEAR_DOWN: detail = `Si el precio baja ${pct(dist)} hoy, la rápida cruza hacia abajo.`; break;
     default: detail = `Sin cruce a menos de ${NEAR_CROSS_PCT}% de precio hoy.`;
   }
-  return `${head}\n${values}\n${detail}`;
+  return `${head}\n${values}\n${detail}\n${ageLine(status, combo)}`;
 }
 
 function isPartial(tfId, row) {
@@ -690,6 +724,23 @@ function bindCheckbox(id, key, onChange) {
   });
 }
 
+/** Entero ≥ 0, null si está vacío, NaN si no es válido. */
+function parseAge(text) {
+  const t = String(text).trim();
+  if (t === '') return null;
+  return /^\d+$/.test(t) ? Number(t) : NaN;
+}
+
+function ageInput(value, placeholder) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.className = 'age';
+  input.placeholder = placeholder;
+  input.value = String(value);
+  return input;
+}
+
 function wireControls() {
   dom.search.addEventListener('input', () => {
     state.search = dom.search.value;
@@ -737,7 +788,36 @@ function wireControls() {
         saveSettings();
         refresh();
       });
-      label.append(document.createTextNode(`${combo.fast}/${combo.slow} `), select);
+      // Rango "cruce hace [de] a [hasta] velas". Vacío = sin límite.
+      const range = state.crossAge[combo.id];
+      const minInput = ageInput(range.min > 0 ? range.min : '', 'de');
+      const maxInput = ageInput(range.max ?? '', 'hasta');
+      const apply = () => {
+        const min = parseAge(minInput.value);
+        const max = parseAge(maxInput.value);
+        minInput.classList.toggle('invalid', Number.isNaN(min));
+        maxInput.classList.toggle('invalid', Number.isNaN(max));
+        if (Number.isNaN(min) || Number.isNaN(max)) return;
+        const empty = min !== null && max !== null && min > max;
+        minInput.classList.toggle('invalid', empty);
+        maxInput.classList.toggle('invalid', empty);
+        state.crossAge[combo.id] = { min: min ?? 0, max };
+        saveSettings();
+        refresh();
+      };
+      minInput.addEventListener('input', apply);
+      maxInput.addEventListener('input', apply);
+      label.append(
+        document.createTextNode(`${combo.fast}/${combo.slow} `),
+        select,
+        document.createTextNode(' cruce hace '),
+        minInput,
+        document.createTextNode(' a '),
+        maxInput,
+        document.createTextNode(' velas'),
+      );
+      label.title +=
+        ' Cruce hace: 0 = vela de hoy, 1 = ayer. Si no se ve ningún cruce, solo se sabe un mínimo: pasa "de N" pero nunca un tope.';
       return label;
     }),
   );

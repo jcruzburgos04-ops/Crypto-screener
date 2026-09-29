@@ -531,3 +531,8 @@ body {
 .cell.cross {
   font-weight: 700;
 }
+
+.field input.age {
+  width: 42px;
+  text-align: right;
+}
